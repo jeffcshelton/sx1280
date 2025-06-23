@@ -1,0 +1,12 @@
+.DS_Store
+.clangd
+.direnv/
+
+*.cmd
+*.d
+*.ko
+*.mod
+*.mod.c
+*.o
+*.order
+*.symvers
