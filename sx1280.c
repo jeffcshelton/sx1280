@@ -624,6 +624,9 @@ static void sx1280_tx_work(struct work_struct *work) {
 
   // Free the SKB.
   dev_consume_skb_any(skb);
+
+  // Restart the packet queue so that xmit may be called again.
+  netif_start_queue(priv->netdev);
 }
 
 static irqreturn_t sx1280_done_irq(int irq, void *dev_id) {
