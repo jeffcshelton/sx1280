@@ -38,9 +38,9 @@ struct sx1280_priv {
   spinlock_t lock;
 };
 
-/**
- * SPI functions.
- */
+/****************
+* SPI Functions *
+****************/
 
 static int sx1280_get_status(struct spi_device *spi, u8 *status) {
   u8 tx[] = { SX1280_CMD_GET_STATUS };
@@ -447,7 +447,7 @@ static int sx1280_get_rssi_inst(struct spi_device *spi, u8 *rssi_inst) {
   return 0;
 }
 
-// Configures the DIO pins to act as interrupts according to their masks.
+/** Configures the DIO pins to act as interrupts according to their masks. */
 static int sx1280_set_dio_irq_params(
   struct spi_device *spi,
   u16 irq_mask,
@@ -468,7 +468,7 @@ static int sx1280_set_dio_irq_params(
   return spi_write(spi, tx, sizeof(tx));
 }
 
-// Gets the current state of the IRQ register.
+/** Gets the current state of the IRQ register. */
 static int sx1280_get_irq_status(struct spi_device *spi, u16 *irq_status) {
   u8 tx[4] = { SX1280_CMD_GET_IRQ_STATUS };
   u8 rx[4];
@@ -484,12 +484,12 @@ static int sx1280_get_irq_status(struct spi_device *spi, u16 *irq_status) {
     return err;
   }
 
-  // The IRQ status is returned in big-endian format.
+  /* The IRQ status is returned in big-endian format. */
   *irq_status = ((u16) rx[2] << 8) | rx[3];
   return 0;
 }
 
-// Clears flags in the IRQ register according to the mask.
+/** Clears flags in the IRQ register according to the mask. */
 static int sx1280_clear_irq_status(struct spi_device *spi, u16 irq_mask) {
   u8 tx[] = {
     SX1280_CMD_CLR_IRQ_STATUS,
@@ -511,7 +511,7 @@ static int sx1280_wait_on_gpio(
 ) {
   u32 elapsed_us = 0;
 
-  // Perform a measurement of the GPIO every 500 us and check the value.
+  /* Perform a measurement of the GPIO every 500 us and check the value. */
   do {
     int meas = gpiod_get_value_cansleep(gpio);
 
@@ -525,13 +525,13 @@ static int sx1280_wait_on_gpio(
     elapsed_us += 500;
   } while (elapsed_us < timeout_us);
 
-  // If the loop has fallen through, the loop timed out.
+  /* If the loop has fallen through, the loop timed out. */
   return -ETIMEDOUT;
 }
 
-/**
- * Driver functions.
- */
+/*******************
+* Driver functions *
+*******************/
 
 static int sx1280_open(struct net_device *dev) {
   netif_start_queue(dev);
@@ -546,26 +546,30 @@ static int sx1280_stop(struct net_device *dev) {
 static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
   struct sx1280_priv *priv = netdev_priv(dev);
 
-  // Stop the packet queue, applying backpressure to the kernel networking stack
-  // that allows the driver to send one packet at a time. Packets that arrive in
-  // the intervening time will be queued by the networking stack.
-  //
-  // Once the corresponding packet has been sent and the chip is ready for a new
-  // one, `netif_wake_queue` is called to tell the kernel that it is permitted
-  // to call `sx1280_xmit` once again.
+  /*
+   * Stop the packet queue, applying backpressure to the kernel networking stack
+   * that allows the driver to send one packet at a time. Packets that arrive in
+   * the intervening time will be queued by the networking stack.
+   *
+   * Once the corresponding packet has been sent and the chip is ready for a new
+   * one, `netif_wake_queue` is called to tell the kernel that it is permitted
+   * to call `sx1280_xmit` once again.
+   */
   netif_stop_queue(dev);
 
-  // Check if there is already a packet being transmitted.
-  //
-  // This is not supposed to happen, as the kernel should not call `sx1280_xmit`
-  // after the queue is stopped. If it does happen, backpressure is applied and
-  // a warning is printed.
+  /*
+   * Check if there is already a packet being transmitted.
+   *
+   * This is not supposed to happen, as the kernel should not call `sx1280_xmit`
+   * after the queue is stopped. If it does happen, backpressure is applied and
+   * a warning is printed.
+   */
   if (priv->tx_skb) {
     dev_warn(&dev->dev, "Packet transmission requested after queue frozen.");
     return NETDEV_TX_BUSY;
   }
 
-  // Queue the work so that it can be performed in a non-atomic context.
+  /* Queue the work so that it can be performed in a non-atomic context. */
   priv->tx_skb = skb;
   queue_work(priv->xmit_queue, &priv->tx_work);
   return NETDEV_TX_OK;
@@ -587,25 +591,31 @@ static void sx1280_tx_work(struct work_struct *work) {
     return;
   }
 
-  // Nullify the Tx SKB in preparation for the next packet.
-  //
-  // Here, the driver does not yet wake the queue because the transmission is
-  // not finished.
+  /*
+   * Nullify the Tx SKB in preparation for the next packet.
+   *
+   * Here, the driver does not yet wake the queue because the transmission is
+   * not finished.
+   */
   priv->tx_skb = NULL;
 
-  // Check that the chip is not in ranging mode.
-  // Packets can't be sent in ranging mode.
+  /*
+   * Check that the chip is not in ranging mode.
+   * Packets can't be sent in ranging mode.
+   */
   if (priv->mode == SX1280_MODE_RANGING) {
     dev_warn(&priv->netdev->dev, "Packet transmission requested in ranging mode.");
     dev_consume_skb_any(skb);
     return;
   }
 
-  // Write the packet data from the SKB into the chip's data buffer.
-  //
-  // The buffer is a maximum of 256 bytes long.
-  // The SKB is restricted to at most 256 bytes by the configuration in
-  // `sx1280_probe` that specifies the MTU as 256 bytes.
+  /*
+   * Write the packet data from the SKB into the chip's data buffer.
+   *
+   * The buffer is a maximum of 256 bytes long.
+   * The SKB is restricted to at most 256 bytes by the configuration in
+   * `sx1280_probe` that specifies the MTU as 256 bytes.
+   */
   if ((err = sx1280_write_buffer(spi, 0, skb->data, skb->len))) {
     dev_err(&spi->dev, "Failed to write packet data to buffer.");
     return;
@@ -622,17 +632,17 @@ static void sx1280_tx_work(struct work_struct *work) {
     return;
   }
 
-  // Free the SKB.
+  /* Free the SKB. */
   dev_consume_skb_any(skb);
 
-  // Restart the packet queue so that xmit may be called again.
+  /* Restart the packet queue so that xmit may be called again. */
   netif_start_queue(priv->netdev);
 }
 
 static irqreturn_t sx1280_done_irq(int irq, void *dev_id) {
   struct sx1280_priv *priv = dev_id;
 
-  // Acknowledge the interrupt.
+  /* Acknowledge the interrupt. */
   sx1280_clear_irq_status(priv->spi, 0xFF);
   return IRQ_HANDLED;
 }
@@ -680,17 +690,14 @@ static int sx1280_parse_dt_ble(
   struct sx1280_gfsk_modulation_params *mod = &ble->modulation;
   struct sx1280_ble_packet_params *pkt = &ble->packet;
 
-  // Modulation variables are fully determined for BLE.
+  /* Modulation variables are fully determined for BLE. */
   *mod = (struct sx1280_gfsk_modulation_params) {
     .bitrate_bandwidth = SX1280_GFSK_BLE_BR_1_000_BW_1_2,
     .modulation_index = SX1280_MOD_IND_0_50,
     .bandwidth_time = SX1280_BT_0_5
   };
 
-  /**
-   * Payload length
-   */
-
+  /* Payload length */
   switch (max_payload_bytes) {
   case 31:
     pkt->payload_length = SX1280_BLE_PAYLOAD_LENGTH_MAX_31_BYTES;
@@ -709,10 +716,7 @@ static int sx1280_parse_dt_ble(
     return -EINVAL;
   }
 
-  /**
-   * CRC
-   */
-
+  /* CRC */
   switch (crc_bytes) {
   case 0:
     pkt->crc_length = SX1280_BLE_CRC_OFF;
@@ -725,10 +729,7 @@ static int sx1280_parse_dt_ble(
     return -EINVAL;
   }
 
-  /**
-   * Test payload
-   */
-
+  /* Test payload */
   if (strcmp(test_payload, "prbs9") == 0) {
     pkt->test_payload = SX1280_BLE_PRBS_9;
   } else if (strcmp(test_payload, "eyelong10") == 0) {
@@ -750,30 +751,18 @@ static int sx1280_parse_dt_ble(
     return -EINVAL;
   }
 
-  /**
-   * Whitening
-   */
-
+  /* Whitening */
   pkt->whitening = disable_whitening
     ? SX1280_WHITENING_DISABLE
     : SX1280_WHITENING_ENABLE;
 
-  /**
-   * Access address
-   */
-
+  /* Access address */
   ble->access_address = access_address;
 
-  /**
-   * CRC seed
-   */
-
+  /* CRC seed */
   ble->crc_seed = crc_seed;
 
-  /**
-   * Power
-   */
-
+  /* Power */
   if (power_dbm < -18 || power_dbm > 13) {
     dev_err(dev, "Invalid value for ble.power-dbm.");
     return -EINVAL;
@@ -781,10 +770,7 @@ static int sx1280_parse_dt_ble(
 
   ble->power = (u8) (power_dbm + 18);
 
-  /**
-   * Ramp time
-   */
-
+  /* Ramp time */
   if (
     ramp_time_us < 2
     || ramp_time_us > 20
@@ -840,7 +826,7 @@ static int sx1280_parse_dt_flrc(
     of_node_put(child);
   }
 
-  // Convenience variables for simple member accesses.
+  /* Convenience variables for simple member accesses. */
   struct sx1280_flrc_params *flrc = &pdata->flrc;
   struct sx1280_flrc_modulation_params *mod = &flrc->modulation;
   struct sx1280_flrc_packet_params *pkt = &flrc->packet;
@@ -869,10 +855,7 @@ static int sx1280_parse_dt_flrc(
     return -EINVAL;
   }
 
-  /**
-   * Coding rate
-   */
-
+  /* Coding rate */
   if (strcmp(coding_rate, "1/2") == 0) {
     mod->coding_rate = SX1280_FLRC_CR_1_2;
   } else if (strcmp(coding_rate, "3/4") == 0) {
@@ -884,10 +867,7 @@ static int sx1280_parse_dt_flrc(
     return -EINVAL;
   }
 
-  /**
-   * Bandwidth-time
-   */
-
+  /* Bandwidth-time */
   if (strcmp(bt, "off") == 0) {
     mod->bandwidth_time = SX1280_BT_OFF;
   } else if (strcmp(bt, "1.0") == 0) {
@@ -899,10 +879,7 @@ static int sx1280_parse_dt_flrc(
     return -EINVAL;
   }
 
-  /**
-   * Preamble length (bits)
-   */
-
+  /* Preamble length (bits) */
   if (
     preamble_bits % 4 != 0
     || preamble_bits > 32
@@ -914,10 +891,7 @@ static int sx1280_parse_dt_flrc(
 
   pkt->agc_preamble_length = (enum sx1280_preamble_length) (preamble_bits << 2);
 
-  /**
-   * Sync word length (bits)
-   */
-
+  /* Sync word length (bits) */
   switch (sync_word_bits) {
   case 0:
     pkt->sync_word_length = SX1280_FLRC_SYNC_WORD_NOSYNC;
@@ -930,10 +904,7 @@ static int sx1280_parse_dt_flrc(
     return -EINVAL;
   }
 
-  /**
-   * Sync word combination
-   */
-
+  /* Sync word combination */
   pkt->sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_OFF;
 
   for (int i = 0; i < 2; i++) {
@@ -945,18 +916,12 @@ static int sx1280_parse_dt_flrc(
     pkt->sync_word_match |= sync_word_match[i] << i;
   }
 
-  /**
-   * Header type
-   */
-
+  /* Header type */
   pkt->header_type = fixed_length
     ? SX1280_RADIO_PACKET_FIXED_LENGTH
     : SX1280_RADIO_PACKET_VARIABLE_LENGTH;
 
-  /**
-   * Payload length
-   */
-
+  /* Payload length */
   if (max_payload_bytes < 6 || max_payload_bytes > 127) {
     dev_err(dev, "Invalid value for flrc.max-payload-bytes.");
     return -EINVAL;
@@ -964,10 +929,7 @@ static int sx1280_parse_dt_flrc(
 
   pkt->payload_length = max_payload_bytes;
 
-  /**
-   * CRC bytes
-   */
-
+  /* CRC bytes */
   switch (crc_bytes) {
   case 0:
     pkt->crc_length = SX1280_FLRC_CRC_OFF;
@@ -986,18 +948,12 @@ static int sx1280_parse_dt_flrc(
     return -EINVAL;
   }
 
-  /**
-   * Whitening
-   */
-
+  /* Whitening */
   pkt->whitening = disable_whitening
     ? SX1280_WHITENING_DISABLE
     : SX1280_WHITENING_ENABLE;
 
-  /**
-   * CRC seed
-   */
-
+  /* CRC seed */
   flrc->crc_seed = crc_seed;
 
   return 0;
@@ -1007,7 +963,7 @@ static int sx1280_parse_dt_gfsk(
   struct device *dev,
   struct sx1280_platform_data *pdata
 ) {
-  // Populate defaults for GFSK mode.
+  /* Populate defaults for GFSK mode. */
   u16 bitrate_kbs = 2000;
   u16 bandwidth_khz = 2400;
   u32 mod_index = 200;
@@ -1028,7 +984,7 @@ static int sx1280_parse_dt_gfsk(
   struct device_node *child = of_get_child_by_name(dev->of_node, "gfsk");
 
   if (child) {
-    // TODO: Handle errors other than being not present.
+    /* TODO: Handle errors other than being not present. */
     of_property_read_u16(child, "bitrate-kbs", &bitrate_kbs);
     of_property_read_u16(child, "bandwidth-khz", &bandwidth_khz);
     of_property_read_u32(child, "modulation-index", &mod_index);
@@ -1053,10 +1009,7 @@ static int sx1280_parse_dt_gfsk(
   struct sx1280_gfsk_modulation_params *mod = &gfsk->modulation;
   struct sx1280_gfsk_packet_params *pkt = &gfsk->packet;
 
-  /**
-   * Bitrate-bandwidth
-   */
-
+  /* Bitrate-bandwidth */
   u32 brbw = CONCAT32(bitrate_kbs, bandwidth_khz);
 
   switch (brbw) {
@@ -1081,10 +1034,7 @@ static int sx1280_parse_dt_gfsk(
     return -EINVAL;
   }
 
-  /**
-   * Modulation index
-   */
-
+  /* Modulation index */
   if (
     (mod_index % 25 != 0 && mod_index != 35)
     || mod_index > 400
@@ -1096,10 +1046,7 @@ static int sx1280_parse_dt_gfsk(
   mod->modulation_index =
     (enum sx1280_gfsk_modulation_index) (mod_index / 25 - 1);
 
-  /**
-   * Bandwidth-time
-   */
-
+  /* Bandwidth-time */
   if (strcmp(bt, "off") == 0) {
     mod->bandwidth_time = SX1280_BT_OFF;
   } else if (strcmp(bt, "1.0") == 0) {
@@ -1111,10 +1058,7 @@ static int sx1280_parse_dt_gfsk(
     return -EINVAL;
   }
 
-  /**
-   * Preamble length (bits)
-   */
-
+  /* Preamble length (bits) */
   if (
     preamble_bits % 4 != 0
     || preamble_bits > 32
@@ -1126,10 +1070,7 @@ static int sx1280_parse_dt_gfsk(
 
   pkt->preamble_len = (enum sx1280_preamble_length) (preamble_bits << 2);
 
-  /**
-   * Sync word length
-   */
-
+  /* Sync word length */
   if (sync_word_bytes < 1 || sync_word_bytes > 5) {
     dev_err(dev, "Invalid value for gfsk.sync-word-bytes.");
     return -EINVAL;
@@ -1137,10 +1078,7 @@ static int sx1280_parse_dt_gfsk(
 
   pkt->sync_word_len = ((sync_word_bytes - 1) * 2);
 
-  /**
-   * Sync word combination
-   */
-
+  /* Sync word combination */
   pkt->sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_OFF;
 
   for (int i = 0; i < 2; i++) {
@@ -1152,45 +1090,27 @@ static int sx1280_parse_dt_gfsk(
     pkt->sync_word_match |= sync_word_match[i] << i;
   }
 
-  /**
-   * Header type
-   */
-
+  /* Header type */
   pkt->header_type = fixed_length
     ? SX1280_RADIO_PACKET_FIXED_LENGTH
     : SX1280_RADIO_PACKET_VARIABLE_LENGTH;
 
-  /**
-   * Payload length
-   */
-
+  /* Payload length */
   pkt->payload_len = max_payload_bytes;
 
-  /**
-   * CRC bytes
-   */
-
+  /* CRC bytes */
   pkt->crc_len = (enum sx1280_gfsk_crc_length) (crc_bytes << 4);
 
-  /**
-   * Whitening
-   */
-
+  /* Whitening */
   pkt->whitening = disable_whitening
     ? SX1280_WHITENING_DISABLE
     : SX1280_WHITENING_ENABLE;
 
-  /**
-   * CRC
-   */
-
+  /* CRC */
   gfsk->crc_seed = crc_seed;
   gfsk->crc_polynomial = crc_polynomial;
 
-  /**
-   * Power
-   */
-
+  /* Power */
   if (power_dbm < -18 || power_dbm > 13) {
     dev_err(dev, "Invalid value for power-dbm.");
     return -EINVAL;
@@ -1198,10 +1118,7 @@ static int sx1280_parse_dt_gfsk(
 
   gfsk->power = (u8) (power_dbm + 18);
 
-  /**
-   * Ramp time
-   */
-
+  /* Ramp time */
   if (
     ramp_time_us < 2
     || ramp_time_us > 20
@@ -1279,10 +1196,7 @@ static int sx1280_parse_dt_lora(
     return -EINVAL;
   }
 
-  /**
-   * Coding rate parsing.
-   */
-
+  /* Coding rate parsing. */
   if (
     strlen(coding_rate) != 3
     || coding_rate[0] != '4'
@@ -1305,8 +1219,10 @@ static int sx1280_parse_dt_lora(
       mod->coding_rate = SX1280_LORA_CR_LI_4_6;
       break;
     case '7':
-      // 4/7 LI coding is not available.
-      // Default to using 4/7 coding without LI.
+      /*
+       * 4/7 LI coding is not available.
+       * Default to using 4/7 coding without LI.
+       */
       mod->coding_rate = SX1280_LORA_CR_4_7;
       break;
     case '8':
@@ -1315,15 +1231,14 @@ static int sx1280_parse_dt_lora(
     }
   }
 
-  /**
-   * Preamble length (bits).
-   */
-
+  /* Preamble length (bits). */
   u32 pb_mant = preamble_bits;
   u8 pb_exp = 0;
 
-  // Reduce the preamble bit count into a mantissa and exponent, where both
-  // are allowed to be [1..15].
+  /*
+   * Reduce the preamble bit count into a mantissa and exponent, where both
+   * are allowed to be [1..15].
+   */
   while ((pb_mant & 1) == 0) {
     pb_mant >>= 1;
     pb_exp++;
@@ -1339,28 +1254,24 @@ static int sx1280_parse_dt_lora(
     return -EINVAL;
   }
 
-  // The format used by the SX1280 to encode preamble length is a strange
-  // choice. It uses bits 7-4 to encode the exponent and bits 3-0 for the
-  // mantissa of the preamble length, in bits. Both components must be in the
-  // range [1..15].
-  //
-  // This increases the maximum preamble length to 491,520 over the 255 that
-  // would ordinarily be representable, but 255 is itself an excessively large
-  // preamble size (8 is typical).
+  /*
+   * The format used by the SX1280 to encode preamble length is a strange
+   * choice. It uses bits 7-4 to encode the exponent and bits 3-0 for the
+   * mantissa of the preamble length, in bits. Both components must be in the
+   * range [1..15].
+   *
+   * This increases the maximum preamble length to 491,520 over the 255 that
+   * would ordinarily be representable, but 255 is itself an excessively large
+   * preamble size (8 is typical).
+   */
   pkt->preamble_len = (pb_exp << 4) | (u8) pb_mant;
 
-  /**
-   * Header type.
-   */
-
+  /* Header type. */
   pkt->header_type = implicit_header
     ? SX1280_IMPLICIT_HEADER
     : SX1280_EXPLICIT_HEADER;
 
-  /**
-   * Payload length.
-   */
-
+  /* Payload length. */
   if (
     max_payload_bytes == 0
     || (mod->coding_rate == SX1280_LORA_CR_LI_4_8 && max_payload_bytes > 253)
@@ -1371,18 +1282,12 @@ static int sx1280_parse_dt_lora(
 
   pkt->payload_len = max_payload_bytes;
 
-  /**
-   * CRC enabling.
-   */
-
+  /* CRC enabling. */
   pkt->crc = disable_crc
     ? SX1280_LORA_CRC_DISABLE
     : SX1280_LORA_CRC_ENABLE;
 
-  /**
-   * IQ inversion.
-   */
-
+  /* IQ inversion. */
   pkt->invert_iq = invert_iq
     ? SX1280_LORA_IQ_INVERTED
     : SX1280_LORA_IQ_STD;
@@ -1404,13 +1309,13 @@ static int sx1280_parse_dt(
   struct device_node *node = dev->of_node;
   int err;
 
-  // Default values for top-level device tree properties.
+  /* Default values for top-level device tree properties. */
   const char *mode = "lora";
   u32 rf_freq_hz = 2400000000;
   u32 startup_timeout_us = 2000;
   u32 tx_timeout_us = 1000;
 
-  // Overwrite the default values if they are specified.
+  /* Overwrite the default values if they are specified. */
   of_property_read_string(node, "mode", &mode);
   of_property_read_u32(node, "rf-freq-hz", &rf_freq_hz);
   of_property_read_u32(node, "startup-timeout-us", &startup_timeout_us);
@@ -1431,12 +1336,16 @@ static int sx1280_parse_dt(
     return -EINVAL;
   }
 
-  // Convert the Hz frequency into the fixed-point representation that the chip
-  // natively understands.
+  /*
+   * Convert the Hz frequency into the fixed-point representation that the chip
+   * natively understands.
+   */
   pdata->rf_freq = SX1280_FREQ_HZ_TO_PLL(rf_freq_hz);
 
-  // Convert the timeout and period base into nanoseconds so that an integer
-  // division can be performed for maximum precision within constraints.
+  /*
+   * Convert the timeout and period base into nanoseconds so that an integer
+   * division can be performed for maximum precision within constraints.
+   */
   u32 timeout_ns = tx_timeout_us * 1000;
   u32 period_base_ns;
 
@@ -1457,17 +1366,21 @@ static int sx1280_parse_dt(
     return -EINVAL;
   }
 
-  // Perform a ceiling division to determine the cycle count.
-  //
-  // The timeout specified is always a minimum bound on the timeout that could
-  // also be affected by outside factors such as kernel timing, timer precision,
-  // etc. When a timeout is specified, it's crucial that the driver guarantees
-  // that _at least_ that amount of time has passed before timing out.
+  /*
+   * Perform a ceiling division to determine the cycle count.
+   *
+   * The timeout specified is always a minimum bound on the timeout that could
+   * also be affected by outside factors such as kernel timing, timer precision,
+   * etc. When a timeout is specified, it's crucial that the driver guarantees
+   * that _at least_ that amount of time has passed before timing out.
+   */
   pdata->period_base_count = (timeout_ns / period_base_ns)
     + (timeout_ns % period_base_ns != 0);
 
-  // Parse all sub-nodes of the device tree, containing the properties
-  // configuring each of the different packet modes of the SX1280.
+  /*
+   * Parse all sub-nodes of the device tree, containing the properties
+   * configuring each of the different packet modes of the SX1280.
+   */
   if (
     (err = sx1280_parse_dt_ble(dev, pdata))
     || (err = sx1280_parse_dt_flrc(dev, pdata))
@@ -1483,22 +1396,26 @@ static int sx1280_parse_dt(
 
 /**
  * Performs the chip setup.
+ * @param priv - The internal SX1280 driver structure.
+ * @param mode - The mode in which to put the SX1280.
  */
 static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
   struct spi_device *spi = priv->spi;
   int err;
 
-  // Switch the chip into STDBY_RC mode.
-  //
-  // While it is always the case that after hard reset, the chip will go to
-  // STDBY_RC, the driver cannot guarantee the state of the chip at this point
-  // as it has not yet had exclusive control over the SPI line.
+  /*
+   * Switch the chip into STDBY_RC mode.
+   *
+   * While it is always the case that after hard reset, the chip will go to
+   * STDBY_RC, the driver cannot guarantee the state of the chip at this point
+   * as it has not yet had exclusive control over the SPI line.
+   */
   sx1280_set_standby(spi, SX1280_STDBY_RC);
 
-  // Set the packet type.
+  /* Set the packet type. */
   sx1280_set_packet_type(spi, mode);
 
-  // Set the RF frequency.
+  /* Set the RF frequency. */
   u32 rf_freq = SX1280_DEFAULT_RF_FREQ_HZ;
   err = of_property_read_u32(spi->dev.of_node, "freq-hz", &rf_freq);
   if (err) {
@@ -1507,16 +1424,20 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
 
   sx1280_set_rf_frequency(spi, rf_freq);
 
-  // Set the Tx and Rx buffer base addresses to 0x0.
-  // This allows the chip to use the full 256-byte data buffer.
-  // The size of the data buffer also restricts the MTU to 256 bytes.
-  //
-  // Since the chip supports half-duplex, the data must be sent/read before
-  // performing another operation, but otherwise will not be overwritten.
+  /*
+   * Set the Tx and Rx buffer base addresses to 0x0.
+   * This allows the chip to use the full 256-byte data buffer.
+   * The size of the data buffer also restricts the MTU to 256 bytes.
+   *
+   * Since the chip supports half-duplex, the data must be sent/read before
+   * performing another operation, but otherwise will not be overwritten.
+   */
   sx1280_set_buffer_base_address(spi, 0x0, 0x0);
 
-  // Extract the modulation and packet params from the platform data, depending
-  // on the mode that the chip is being commanded into.
+  /*
+   * Extract the modulation and packet params from the platform data, depending
+   * on the mode that the chip is being commanded into.
+   */
   union sx1280_modulation_params mod_params;
   union sx1280_packet_params pkt_params;
 
@@ -1543,13 +1464,17 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
     break;
   }
 
-  // Set modulation and packet parameters.
-  // These may be changed later by ioctl calls.
+  /*
+   * Set modulation and packet parameters.
+   * These may be changed later by ioctl calls.
+   */
   sx1280_set_modulation_params(spi, mod_params);
   sx1280_set_packet_params(spi, pkt_params);
 
-  // Write the sync words.
-  // TODO: Allow customization.
+  /*
+   * Write the sync words.
+   * TODO: Allow customization.
+   */
   u8 sync_word[5] = { 0 };
   sx1280_write_register(spi, SX1280_REG_SYNC_ADDRESS_1_BYTE_4, sync_word, 5);
 
@@ -1570,13 +1495,13 @@ static const struct net_device_ops sx1280_netdev_ops = {
 static int sx1280_probe(struct spi_device *spi) {
   int err;
 
-  // Allocate a new net device (without registering, yet).
+  /* Allocate a new net device (without registering, yet). */
   struct net_device *netdev = alloc_netdev(
     sizeof(struct sx1280_priv),
     "sx%d",
     NET_NAME_UNKNOWN,
 
-    // TODO: Evaluate whether this is the right setup handler.
+    /* TODO: Evaluate whether this is the right setup handler. */
     ether_setup
   );
 
@@ -1584,27 +1509,31 @@ static int sx1280_probe(struct spi_device *spi) {
     return -ENOMEM;
   }
 
-  // Set properties of the net device.
+  /* Set properties of the net device. */
   netdev->netdev_ops = &sx1280_netdev_ops;
   SET_NETDEV_DEV(netdev, &spi->dev);
 
-  // Create and register the priv structure.
+  /* Create and register the priv structure. */
   struct sx1280_priv *priv = netdev_priv(netdev);
   priv->mode = SX1280_MODE_GFSK;
   priv->netdev = netdev;
   priv->spi = spi;
   spin_lock_init(&priv->lock);
 
-  // Attempt to get legacy platform data.
-  // Otherwise, parse the device tree.
+  /*
+   * Attempt to get legacy platform data.
+   * Otherwise, parse the device tree.
+   */
   struct sx1280_platform_data *legacy_platform = dev_get_platdata(&spi->dev);
   if (legacy_platform) {
     priv->pdata = *legacy_platform;
 
-    // If platform data is used, the GPIOs are passed as integers.
-    // This is not the preferred way for GPIOs to be specified in device trees
-    // anymore, so the conversion of GPIOs into descriptors must be done
-    // separately.
+    /*
+     * If platform data is used, the GPIOs are passed as integers.
+     * This is not the preferred way for GPIOs to be specified in device trees
+     * anymore, so the conversion of GPIOs into descriptors must be done
+     * separately.
+     */
 
     priv->busy = gpio_to_desc(legacy_platform->busy_gpio);
     err = -EINVAL;
@@ -1630,8 +1559,10 @@ static int sx1280_probe(struct spi_device *spi) {
       goto err_platform;
     }
 
-    // If a device tree is used, then the GPIOs are directly registered with the
-    // SPI device and freed upon the SPI device being unregistered.
+    /*
+     * If a device tree is used, then the GPIOs are directly registered with the
+     * SPI device and freed upon the SPI device being unregistered.
+     */
 
     priv->busy = devm_gpiod_get(&spi->dev, "busy", GPIOD_IN);
     if (IS_ERR(priv->busy)) {
@@ -1658,7 +1589,7 @@ static int sx1280_probe(struct spi_device *spi) {
     }
   }
 
-  // Request IRQs for each DIO.
+  /* Request IRQs for each DIO. */
   for (int i = 0; i < ARRAY_SIZE(priv->dios); i++) {
     int irq = gpiod_to_irq(priv->dios[i]);
     if (irq < 0) {
@@ -1669,7 +1600,7 @@ static int sx1280_probe(struct spi_device *spi) {
     priv->irqs[i] = irq;
   }
 
-  // Register the DIO IRQs to their interrupt handlers.
+  /* Register the DIO IRQs to their interrupt handlers. */
 
 #define DIO_IRQ(i, f, n) devm_request_threaded_irq( \
   &spi->dev, \
@@ -1690,19 +1621,19 @@ static int sx1280_probe(struct spi_device *spi) {
     goto err_irq;
   }
 
-  // Define SPI settings according to SX1280 datasheet.
+  /* Define SPI settings according to SX1280 datasheet. */
   spi_set_drvdata(spi, priv);
   spi->bits_per_word = 8;
-  spi->max_speed_hz = 18000000;  // 18 MHz
-  spi->mode = 0;                 // CPOL = 0, CPHA = 0
+  spi->max_speed_hz = 18000000;  /* 18 MHz */
+  spi->mode = 0;                 /* CPOL = 0, CPHA = 0 */
 
-  // Apply the SPI settings above and handle errors.
+  /* Apply the SPI settings above and handle errors. */
   if ((err = spi_setup(spi))) {
     dev_err(&spi->dev, "Failed to apply SPI settings.");
     goto err_spi;
   }
 
-  // Wait until the chip is not busy to initiate setup.
+  /* Wait until the chip is not busy to initiate setup. */
   err = sx1280_wait_on_gpio(priv->busy, 0, priv->pdata.startup_timeout_us);
   if (err) {
     dev_err(&spi->dev, "Startup sequence timed out.");
@@ -1713,8 +1644,10 @@ static int sx1280_probe(struct spi_device *spi) {
     goto err_setup;
   }
 
-  // Instruct the chip to use the specified DIO as IRQ.
-  // TODO: Add other interrupt classes as necessary.
+  /*
+   * Instruct the chip to use the specified DIO as IRQ.
+   * TODO: Add other interrupt classes as necessary.
+   */
   sx1280_set_dio_irq_params(
     spi,
     SX1280_IRQ_RX_DONE,
@@ -1725,7 +1658,7 @@ static int sx1280_probe(struct spi_device *spi) {
     }
   );
 
-  // Initialize the work queue and work items for packet transmission.
+  /* Initialize the work queue and work items for packet transmission. */
   priv->xmit_queue = alloc_workqueue(
     "%s",
     WQ_MEM_RECLAIM,
@@ -1735,8 +1668,10 @@ static int sx1280_probe(struct spi_device *spi) {
 
   INIT_WORK(&priv->tx_work, sx1280_tx_work);
 
-  // Register the new net device.
-  // The first one will appear as interface lora0.
+  /*
+   * Register the new net device.
+   * The first one will appear as interface lora0.
+   */
   if ((err = register_netdev(netdev))) {
     goto err_register;
   }
