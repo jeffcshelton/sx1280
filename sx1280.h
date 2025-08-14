@@ -459,8 +459,6 @@ struct sx1280_ble_params {
 
   u32 access_address;
   u16 crc_seed;
-  u8 power;
-  u8 ramp_time;
 };
 
 struct sx1280_gfsk_params {
@@ -469,8 +467,6 @@ struct sx1280_gfsk_params {
 
   u16 crc_seed;
   u16 crc_polynomial;
-  u8 power;
-  u8 ramp_time;
 };
 
 struct sx1280_flrc_params {
@@ -529,11 +525,13 @@ enum sx1280_period_base {
  * @ranging - Distance ranging configuration.
  */
 struct sx1280_platform_data {
-  u32 rf_freq;
+  enum sx1280_mode mode;
   enum sx1280_period_base period_base;
   u16 period_base_count;
+  u8 power;
+  enum sx1280_ramp_time ramp_time;
+  u32 rf_freq;
   u32 startup_timeout_us;
-  enum sx1280_mode mode;
 
   unsigned int busy_gpio;
   unsigned int dio_gpios[3];

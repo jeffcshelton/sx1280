@@ -12,25 +12,17 @@ properties:
     const: semtech,sx1280
 
   reg:
-    maxItems: 1
     type: integer
+    maxItems: 1
 
-  dio-map:
+  busy-gpios:
+    type: phandle-array
+    maxItems: 1
+
+  dio-gpios:
     type: phandle-array
     maxItems: 3
     minItems: 1
-
-  dio0:
-    maxItems: 1
-    type: phandle-array
-
-  dio1:
-    maxItems: 1
-    type: phandle-array
-
-  dio2:
-    maxItems: 1
-    type: phandle-array
 
   mode:
     description: |
@@ -55,6 +47,15 @@ properties:
     type: integer
     maximum: 262143999
     minimum: 0
+
+  power-dbm:
+    type: integer
+    maximum: 13
+    minimum: -18
+
+  ramp-time-us:
+    type: integer
+    enum: [2, 4, 6, 8, 10, 12, 16, 20]
 
   ble:
     type: object
@@ -90,15 +91,6 @@ properties:
         type: integer
         maximum: 65535
         minimum: 0
-
-      power-dbm:
-        type: integer
-        maximum: 13
-        minimum: -18
-
-      ramp-time-us:
-        type: integer
-        enum: [2, 4, 6, 8, 10, 12, 16, 20]
 
   gfsk:
     type: object
@@ -183,15 +175,6 @@ properties:
         type: integer
         maximum: 65535
         minimum: 0
-
-      ramp-time-us:
-        type: integer
-        enum: [2, 4, 6, 8, 10, 12, 16, 20]
-
-      power-dbm:
-        type: integer
-        maximum: 13
-        minimum: -18
 
   flrc:
     bitrate-kbs:

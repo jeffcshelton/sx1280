@@ -668,8 +668,6 @@ static int sx1280_parse_dt_ble(
   bool disable_whitening = false;
   u32 access_address = 0;
   u16 crc_seed = 0;
-  s32 power_dbm = 13;
-  u32 ramp_time_us = 2;
 
   struct device_node *child = of_get_child_by_name(dev->of_node, "ble");
 
@@ -680,8 +678,6 @@ static int sx1280_parse_dt_ble(
     disable_whitening = of_property_read_bool(child, "disable-whitening");
     of_property_read_u32(child, "access-address", &access_address);
     of_property_read_u16(child, "crc-seed", &crc_seed);
-    of_property_read_s32(child, "power-dbm", &power_dbm);
-    of_property_read_u32(child, "ramp-time-us", &ramp_time_us);
 
     of_node_put(child);
   }
@@ -761,31 +757,6 @@ static int sx1280_parse_dt_ble(
 
   /* CRC seed */
   ble->crc_seed = crc_seed;
-
-  /* Power */
-  if (power_dbm < -18 || power_dbm > 13) {
-    dev_err(dev, "Invalid value for ble.power-dbm.");
-    return -EINVAL;
-  }
-
-  ble->power = (u8) (power_dbm + 18);
-
-  /* Ramp time */
-  if (
-    ramp_time_us < 2
-    || ramp_time_us > 20
-    || ramp_time_us % 2 != 0
-    || ramp_time_us == 14
-  ) {
-    dev_err(dev, "Invalid value for ble.ramp-time-us.");
-    return -EINVAL;
-  }
-
-  if (ramp_time_us <= 12) {
-    ble->ramp_time = (ramp_time_us - 2) << 4;
-  } else {
-    ble->ramp_time = (ramp_time_us + 8) << 3;
-  }
 
   return 0;
 }
@@ -978,8 +949,6 @@ static int sx1280_parse_dt_gfsk(
   u32 sync_words[3] = { 0, 0, 0 };
   u32 crc_seed = 0;
   u32 crc_polynomial = 0;
-  s32 power_dbm = 13;
-  u32 ramp_time_us = 2;
 
   struct device_node *child = of_get_child_by_name(dev->of_node, "gfsk");
 
@@ -999,8 +968,6 @@ static int sx1280_parse_dt_gfsk(
     of_property_read_variable_u32_array(child, "sync-words", sync_words, 0, 3);
     of_property_read_u32(child, "crc-seed", &crc_seed);
     of_property_read_u32(child, "crc-polynomial", &crc_polynomial);
-    of_property_read_s32(child, "power-dbm", &power_dbm);
-    of_property_read_u32(child, "ramp-time-us", &ramp_time_us);
 
     of_node_put(child);
   }
@@ -1109,31 +1076,6 @@ static int sx1280_parse_dt_gfsk(
   /* CRC */
   gfsk->crc_seed = crc_seed;
   gfsk->crc_polynomial = crc_polynomial;
-
-  /* Power */
-  if (power_dbm < -18 || power_dbm > 13) {
-    dev_err(dev, "Invalid value for power-dbm.");
-    return -EINVAL;
-  }
-
-  gfsk->power = (u8) (power_dbm + 18);
-
-  /* Ramp time */
-  if (
-    ramp_time_us < 2
-    || ramp_time_us > 20
-    || ramp_time_us % 2 != 0
-    || ramp_time_us == 14
-  ) {
-    dev_err(dev, "Invalid value for ramp-time-us.");
-    return -EINVAL;
-  }
-
-  if (ramp_time_us <= 12) {
-    gfsk->ramp_time = (ramp_time_us - 2) << 4;
-  } else {
-    gfsk->ramp_time = (ramp_time_us + 8) << 3;
-  }
 
   return 0;
 }
@@ -1310,13 +1252,16 @@ static int sx1280_parse_dt(
   int err;
 
   /* Default values for top-level device tree properties. */
-  const char *mode = "lora";
+  const char *mode = "gfsk";
+  s32 power_dbm = 13;
+  u32 ramp_time_us = 2;
   u32 rf_freq_hz = 2400000000;
   u32 startup_timeout_us = 2000;
   u32 tx_timeout_us = 1000;
 
   /* Overwrite the default values if they are specified. */
   of_property_read_string(node, "mode", &mode);
+  of_property_read_s32(node, "power-dbm", &power_dbm);
   of_property_read_u32(node, "rf-freq-hz", &rf_freq_hz);
   of_property_read_u32(node, "startup-timeout-us", &startup_timeout_us);
   of_property_read_u32(node, "tx-timeout-us", &tx_timeout_us);
@@ -1334,6 +1279,32 @@ static int sx1280_parse_dt(
   } else {
     dev_err(dev, "Invalid value for mode.");
     return -EINVAL;
+  }
+
+  /* Power */
+  if (power_dbm < -18 || power_dbm > 13) {
+    dev_err(dev, "Invalid value for power-dbm.");
+    return -EINVAL;
+  }
+
+  pdata->power = power_dbm + 18;
+
+
+  /* Ramp time */
+  if (
+    ramp_time_us < 2
+    || ramp_time_us > 20
+    || ramp_time_us % 2 != 0
+    || ramp_time_us == 14
+  ) {
+    dev_err(dev, "Invalid value for ramp-time-us.");
+    return -EINVAL;
+  }
+
+  if (ramp_time_us <= 12) {
+    pdata->ramp_time = (ramp_time_us - 2) << 4;
+  } else {
+    pdata->ramp_time = (ramp_time_us + 8) << 3;
   }
 
   /*
@@ -1395,12 +1366,114 @@ static int sx1280_parse_dt(
 }
 
 /**
+ * Parses busy GPIO and DIO GPIOs.
+ * @param priv - The internal SX1280 driver structure.
+ * @param dt - Whether a device tree configuration or platform data is used.
+ */
+static int sx1280_parse_gpios(
+  struct device *dev,
+  struct sx1280_priv *priv,
+  bool dt
+) {
+  int err;
+
+  /*
+   * 1. Configure the busy pin GPIO.
+   * 2. Configure the DIO1, DIO2, DIO3 GPIOs.
+   */
+
+  if (dt) {
+    /*
+     * If a device tree is used, then the GPIOs are directly registered with the
+     * SPI device and freed upon the SPI device being unregistered.
+     */
+
+    priv->busy = devm_gpiod_get(dev, "busy", GPIOD_IN);
+    if (IS_ERR(priv->busy)) {
+      dev_err(dev, "Failed to configure GPIO for busy pin.");
+      return PTR_ERR(priv->busy);
+    }
+
+    for (int i = 0; i < 3; i++) {
+      struct gpio_desc *dio = devm_gpiod_get_index(dev, "dio", i, GPIOD_IN);
+
+      if (IS_ERR(dio)) {
+        dev_err(dev, "Failed to configure GPIO for DIO%d.", i);
+        return PTR_ERR(dio);
+      }
+
+      priv->dios[i] = dio;
+    }
+  } else {
+    /*
+     * If platform data is used, the GPIOs are passed as integers.
+     * This is not the preferred way for GPIOs to be specified in device trees
+     * anymore, so the conversion of GPIOs into descriptors must be done
+     * separately.
+     */
+
+    priv->busy = gpio_to_desc(priv->pdata.busy_gpio);
+    err = -EINVAL;
+    if (!priv->busy || (err = gpiod_direction_input(priv->busy))) {
+      dev_err(dev, "Failed to configure GPIO for busy pin.");
+      return err;
+    }
+
+    for (int i = 0; i < 3; i++) {
+      struct gpio_desc *dio = gpio_to_desc(priv->pdata.dio_gpios[i]);
+
+      if (!dio || (err = gpiod_direction_input(dio))) {
+        dev_err(dev, "Failed to configure GPIO for DIO%d.", i);
+        return err;
+      }
+
+      priv->dios[i] = dio;
+    }
+  }
+
+  /* Request IRQs for each DIO. */
+  for (int i = 0; i < ARRAY_SIZE(priv->dios); i++) {
+    int irq = gpiod_to_irq(priv->dios[i]);
+    if (irq < 0) {
+      dev_err(dev, "Failed to register IRQ for DIO%d.", i);
+      return irq;
+    }
+
+    priv->irqs[i] = irq;
+  }
+
+  /* Register the DIO IRQs to their interrupt handlers. */
+
+#define DIO_IRQ(i, f, n) devm_request_threaded_irq( \
+  dev, \
+  priv->irqs[i], \
+  NULL, \
+  f, \
+  IRQF_TRIGGER_RISING | IRQF_ONESHOT, \
+  n, \
+  priv \
+)
+
+  if (
+    (err = DIO_IRQ(0, sx1280_done_irq, "sx1280_done"))
+    || (err = DIO_IRQ(1, sx1280_timeout_irq, "sx1280_timeout"))
+    || (err = DIO_IRQ(2, sx1280_error_irq, "sx1280_error"))
+  ) {
+    dev_err(dev, "Failed to request IRQ.");
+    return err;
+  }
+
+  return 0;
+}
+
+/**
  * Performs the chip setup.
  * @param priv - The internal SX1280 driver structure.
  * @param mode - The mode in which to put the SX1280.
  */
 static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
   struct spi_device *spi = priv->spi;
+  struct sx1280_platform_data *pdata = &priv->pdata;
   int err;
 
   /*
@@ -1410,19 +1483,22 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
    * STDBY_RC, the driver cannot guarantee the state of the chip at this point
    * as it has not yet had exclusive control over the SPI line.
    */
-  sx1280_set_standby(spi, SX1280_STDBY_RC);
-
-  /* Set the packet type. */
-  sx1280_set_packet_type(spi, mode);
-
-  /* Set the RF frequency. */
-  u32 rf_freq = SX1280_DEFAULT_RF_FREQ_HZ;
-  err = of_property_read_u32(spi->dev.of_node, "freq-hz", &rf_freq);
-  if (err) {
-    dev_info(&spi->dev, "freq-hz not defined in device tree. Defaulting to 2.4 GHz.");
+  if ((err = sx1280_set_standby(spi, SX1280_STDBY_RC)) < 0) {
+    dev_err(&spi->dev, "Failed to set into standby.");
+    return err;
   }
 
-  sx1280_set_rf_frequency(spi, rf_freq);
+  /* Set the packet type. */
+  if ((err = sx1280_set_packet_type(spi, mode)) < 0) {
+    dev_err(&spi->dev, "Failed to set packet type.");
+    return err;
+  }
+
+  /* Set the RF frequency. */
+  if ((err = sx1280_set_rf_frequency(spi, pdata->rf_freq)) < 0) {
+    dev_err(&spi->dev, "Failed to set RF frequency.");
+    return err;
+  }
 
   /*
    * Set the Tx and Rx buffer base addresses to 0x0.
@@ -1432,7 +1508,10 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
    * Since the chip supports half-duplex, the data must be sent/read before
    * performing another operation, but otherwise will not be overwritten.
    */
-  sx1280_set_buffer_base_address(spi, 0x0, 0x0);
+  if ((err = sx1280_set_buffer_base_address(spi, 0x0, 0x0)) < 0) {
+    dev_err(&spi->dev, "Failed to set buffer base address.");
+    return err;
+  }
 
   /*
    * Extract the modulation and packet params from the platform data, depending
@@ -1443,24 +1522,24 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
 
   switch (mode) {
   case SX1280_MODE_BLE:
-    mod_params.gfsk = priv->pdata.ble.modulation;
-    pkt_params.ble = priv->pdata.ble.packet;
+    mod_params.gfsk = pdata->ble.modulation;
+    pkt_params.ble = pdata->ble.packet;
     break;
   case SX1280_MODE_FLRC:
-    mod_params.flrc = priv->pdata.flrc.modulation;
-    pkt_params.flrc = priv->pdata.flrc.packet;
+    mod_params.flrc = pdata->flrc.modulation;
+    pkt_params.flrc = pdata->flrc.packet;
     break;
   case SX1280_MODE_GFSK:
-    mod_params.gfsk = priv->pdata.gfsk.modulation;
-    pkt_params.gfsk = priv->pdata.gfsk.packet;
+    mod_params.gfsk = pdata->gfsk.modulation;
+    pkt_params.gfsk = pdata->gfsk.packet;
     break;
   case SX1280_MODE_LORA:
-    mod_params.lora = priv->pdata.lora.modulation;
-    pkt_params.lora = priv->pdata.lora.packet;
+    mod_params.lora = pdata->lora.modulation;
+    pkt_params.lora = pdata->lora.packet;
     break;
   case SX1280_MODE_RANGING:
-    mod_params.lora = priv->pdata.ranging.modulation;
-    pkt_params.lora = priv->pdata.ranging.packet;
+    mod_params.lora = pdata->ranging.modulation;
+    pkt_params.lora = pdata->ranging.packet;
     break;
   }
 
@@ -1468,8 +1547,15 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
    * Set modulation and packet parameters.
    * These may be changed later by ioctl calls.
    */
-  sx1280_set_modulation_params(spi, mod_params);
-  sx1280_set_packet_params(spi, pkt_params);
+  if ((err = sx1280_set_modulation_params(spi, mod_params)) < 0) {
+    dev_err(&spi->dev, "Failed to set modulation parameters.");
+    return err;
+  }
+
+  if ((err = sx1280_set_packet_params(spi, pkt_params)) < 0) {
+    dev_err(&spi->dev, "Failed to set packet parameters.");
+    return err;
+  }
 
   /*
    * Write the sync words.
@@ -1477,6 +1563,14 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
    */
   u8 sync_word[5] = { 0 };
   sx1280_write_register(spi, SX1280_REG_SYNC_ADDRESS_1_BYTE_4, sync_word, 5);
+
+  /*
+   * Set TX and RX settings.
+   */
+  if ((err = sx1280_set_tx_params(spi, pdata->power, pdata->ramp_time)) < 0) {
+    dev_err(&spi->dev, "Failed to set TX parameters.");
+    return err;
+  }
 
   return 0;
 }
@@ -1527,98 +1621,19 @@ static int sx1280_probe(struct spi_device *spi) {
   struct sx1280_platform_data *legacy_platform = dev_get_platdata(&spi->dev);
   if (legacy_platform) {
     priv->pdata = *legacy_platform;
-
-    /*
-     * If platform data is used, the GPIOs are passed as integers.
-     * This is not the preferred way for GPIOs to be specified in device trees
-     * anymore, so the conversion of GPIOs into descriptors must be done
-     * separately.
-     */
-
-    priv->busy = gpio_to_desc(legacy_platform->busy_gpio);
-    err = -EINVAL;
-    if (!priv->busy || (err = gpiod_direction_input(priv->busy))) {
-      dev_err(&spi->dev, "Failed to configure GPIO for busy pin.");
-      goto err_platform;
-    }
-
-    for (int i = 0; i < 3; i++) {
-      struct gpio_desc *dio = gpio_to_desc(legacy_platform->dio_gpios[i]);
-
-      err = -EINVAL;
-      if (!dio || (err = gpiod_direction_input(dio))) {
-        dev_err(&spi->dev, "Failed to configure GPIO for DIO%d.", i);
-        goto err_platform;
-      }
-
-      priv->dios[i] = dio;
-    }
   } else {
     if ((err = sx1280_parse_dt(&spi->dev, &priv->pdata))) {
       dev_err(&spi->dev, "Failed to parse device tree.");
       goto err_platform;
     }
-
-    /*
-     * If a device tree is used, then the GPIOs are directly registered with the
-     * SPI device and freed upon the SPI device being unregistered.
-     */
-
-    priv->busy = devm_gpiod_get(&spi->dev, "busy", GPIOD_IN);
-    if (IS_ERR(priv->busy)) {
-      dev_err(&spi->dev, "Failed to configure GPIO for busy pin.");
-      err = PTR_ERR(priv->busy);
-      goto err_platform;
-    }
-
-    for (int i = 0; i < 3; i++) {
-      struct gpio_desc *dio = devm_gpiod_get_index(
-        &spi->dev,
-        "dio-map",
-        i,
-        GPIOD_IN
-      );
-
-      if (IS_ERR(dio)) {
-        dev_err(&spi->dev, "Failed to configure GPIO for DIO%d.", i);
-        err = PTR_ERR(dio);
-        goto err_platform;
-      }
-
-      priv->dios[i] = dio;
-    }
   }
 
-  /* Request IRQs for each DIO. */
-  for (int i = 0; i < ARRAY_SIZE(priv->dios); i++) {
-    int irq = gpiod_to_irq(priv->dios[i]);
-    if (irq < 0) {
-      dev_err(&spi->dev, "Failed to register IRQ for DIO%d.", i);
-      goto err_irq;
-    }
-
-    priv->irqs[i] = irq;
-  }
-
-  /* Register the DIO IRQs to their interrupt handlers. */
-
-#define DIO_IRQ(i, f, n) devm_request_threaded_irq( \
-  &spi->dev, \
-  priv->irqs[i], \
-  NULL, \
-  f, \
-  IRQF_TRIGGER_RISING | IRQF_ONESHOT, \
-  n, \
-  priv \
-)
-
-  if (
-    (err = DIO_IRQ(0, sx1280_done_irq, "sx1280_done"))
-    || (err = DIO_IRQ(1, sx1280_timeout_irq, "sx1280_timeout"))
-    || (err = DIO_IRQ(2, sx1280_error_irq, "sx1280_error"))
-  ) {
-    dev_err(&spi->dev, "Failed to request IRQ.");
-    goto err_irq;
+  /*
+   * Parse GPIOs according to whether a device tree or platform data is used.
+   */
+  if ((err = sx1280_parse_gpios(&spi->dev, priv, !legacy_platform))) {
+    dev_err(&spi->dev, "Failed to configure GPIOs.");
+    goto err_gpio;
   }
 
   /* Define SPI settings according to SX1280 datasheet. */
@@ -1641,6 +1656,7 @@ static int sx1280_probe(struct spi_device *spi) {
   }
 
   if ((err = sx1280_setup(priv, SX1280_MODE_LORA))) {
+    dev_err(&spi->dev, "Failed to set up the SX1280.");
     goto err_setup;
   }
 
@@ -1648,7 +1664,7 @@ static int sx1280_probe(struct spi_device *spi) {
    * Instruct the chip to use the specified DIO as IRQ.
    * TODO: Add other interrupt classes as necessary.
    */
-  sx1280_set_dio_irq_params(
+  err = sx1280_set_dio_irq_params(
     spi,
     SX1280_IRQ_RX_DONE,
     (u16[]) {
@@ -1657,6 +1673,11 @@ static int sx1280_probe(struct spi_device *spi) {
       0
     }
   );
+
+  if (err < 0) {
+    dev_err(&spi->dev, "Failed to set the DIO IRQ parameters.");
+    goto err_setup;
+  }
 
   /* Initialize the work queue and work items for packet transmission. */
   priv->xmit_queue = alloc_workqueue(
@@ -1682,9 +1703,9 @@ static int sx1280_probe(struct spi_device *spi) {
 err_register:
   destroy_workqueue(priv->xmit_queue);
 err_spi:
-err_irq:
 err_busy:
 err_setup:
+err_gpio:
 err_platform:
   free_netdev(netdev);
   return err;
@@ -1692,6 +1713,8 @@ err_platform:
 
 static void sx1280_remove(struct spi_device *spi) {
   struct sx1280_priv *priv = spi_get_drvdata(spi);
+
+  /* TODO: Potentially need to free GPIOs for platform data instances. */
 
   cancel_work_sync(&priv->tx_work);
   destroy_workqueue(priv->xmit_queue);
