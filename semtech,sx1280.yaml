@@ -22,7 +22,7 @@ properties:
   dio-gpios:
     type: phandle-array
     maxItems: 3
-    minItems: 1
+    minItems: 3
 
   mode:
     description: |
@@ -86,7 +86,7 @@ properties:
 
       access-address:
         type: integer
-        
+
       crc-seed:
         type: integer
         maximum: 65535

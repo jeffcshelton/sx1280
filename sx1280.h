@@ -370,7 +370,7 @@ enum sx1280_standby {
 #define SX1280_IRQ_CAD_DONE (1 << 12)
 #define SX1280_IRQ_CAD_DETECTED (1 << 13)
 #define SX1280_IRQ_RX_TX_TIMEOUT (1 << 14)
-#define SX1280_IRQ_PREABLE_DETECTED (1 << 15)
+#define SX1280_IRQ_PREAMBLE_DETECTED (1 << 15)
 #define SX1280_IRQ_ADVANCED_RANGING_DONE (1 << 15)
 
 // Register reading macros.
@@ -534,7 +534,7 @@ struct sx1280_platform_data {
   u32 startup_timeout_us;
 
   unsigned int busy_gpio;
-  unsigned int dio_gpios[3];
+  int dio_gpios[3];
 
   struct sx1280_ble_params ble;
   struct sx1280_gfsk_params gfsk;
