@@ -603,7 +603,7 @@ static void sx1280_tx_work(struct work_struct *work) {
       &priv->netdev->dev,
       "Packet transmission requested in ranging mode.\n"
     );
-    dev_consume_skb_any(skb);
+    dev_kfree_skb(skb);
     return;
   }
 
@@ -631,7 +631,7 @@ static void sx1280_tx_work(struct work_struct *work) {
   }
 
   /* Free the SKB. */
-  dev_consume_skb_any(skb);
+  dev_kfree_skb(skb);
 
   /* Restart the packet queue so that xmit may be called again. */
   netif_start_queue(priv->netdev);
@@ -719,7 +719,7 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
     }
 
     skb->dev = priv->netdev;
-    skb->protocol = eth_type_trans();
+    skb->protocol = ETH_P_IP;
     skb->ip_summed = CHECKSUM_NONE;
 
     netif_rx(skb);
