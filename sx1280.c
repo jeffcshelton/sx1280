@@ -1239,7 +1239,7 @@ static int sx1280_parse_dt_lora(
 
   u32 spreading_factor = 12;
   u32 bandwidth_khz = 1600;
-  const char *coding_rate = "4/8";
+  const char *coding_rate = "4/7";
   bool disable_li;
   u32 preamble_bits = 8;
   bool implicit_header;
@@ -1287,7 +1287,7 @@ static int sx1280_parse_dt_lora(
     mod->bandwidth = SX1280_LORA_BW_200;
     break;
   default:
-    dev_err(dev, "Invalid value for bandwidth-khz.\n");
+    dev_err(dev, "Invalid value for lora.bandwidth-khz.\n");
     return -EINVAL;
   }
 
@@ -1299,7 +1299,7 @@ static int sx1280_parse_dt_lora(
     || coding_rate[2] < '5'
     || coding_rate[2] > '8'
   ) {
-    dev_err(dev, "Invalid coding-rate. Must be 4/5, 4/6, 4/7, or 4/8.\n");
+    dev_err(dev, "Invalid lora.coding-rate. Must be 4/5, 4/6, 4/7, or 4/8.\n");
     return -EINVAL;
   }
 
@@ -1345,7 +1345,7 @@ static int sx1280_parse_dt_lora(
     || pb_exp == 0
     || pb_exp > 15
   ) {
-    dev_err(dev, "Invalid value for preamble-bits.\n");
+    dev_err(dev, "Invalid value for lora.preamble-bits.\n");
     return -EINVAL;
   }
 
@@ -1371,7 +1371,7 @@ static int sx1280_parse_dt_lora(
     max_payload_bytes == 0
     || (mod->coding_rate == SX1280_LORA_CR_LI_4_8 && max_payload_bytes > 253)
   ) {
-    dev_err(dev, "Invalid value for max-payload-bytes.\n");
+    dev_err(dev, "Invalid value for lora.max-payload-bytes.\n");
     return -EINVAL;
   }
 
