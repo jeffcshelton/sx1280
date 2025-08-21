@@ -537,16 +537,22 @@ static int sx1280_wait_on_gpio(
 *******************/
 
 static int sx1280_open(struct net_device *dev) {
+  dev_dbg(&dev->dev, "sx1280_open");
+
   netif_start_queue(dev);
   return 0;
 }
 
 static int sx1280_stop(struct net_device *dev) {
+  dev_dbg(&dev->dev, "sx1280_stop");
+
   netif_stop_queue(dev);
   return 0;
 }
 
 static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
+  dev_dbg(&dev->dev, "sx1280_xmit");
+
   struct sx1280_priv *priv = netdev_priv(dev);
 
   /*
@@ -583,6 +589,8 @@ static void sx1280_tx_work(struct work_struct *work) {
   struct spi_device *spi = priv->spi;
   struct sk_buff *skb = priv->tx_skb;
   int err;
+
+  dev_dbg(&spi->dev, "sx1280_tx_work");
 
   if (!skb) {
     dev_warn(&priv->netdev->dev, "Transmission queued without packet SKB.\n");
@@ -646,6 +654,8 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
   struct sx1280_priv *priv = (struct sx1280_priv *) dev_id;
   struct spi_device *spi = priv->spi;
   u16 mask;
+
+  dev_dbg(&spi->dev, "sx1280_irq");
 
   if ((err = sx1280_get_irq_status(priv->spi, &mask)) < 0) {
     dev_err(&spi->dev, "Failed to get IRQ status.\n");
@@ -719,7 +729,7 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
     }
 
     skb->dev = priv->netdev;
-    skb->protocol = ETH_P_IP;
+    skb->protocol = ETH_P_IP; /* Change to dynamically do this. */
     skb->ip_summed = CHECKSUM_NONE;
 
     netif_rx(skb);
@@ -797,6 +807,8 @@ static int sx1280_parse_dt_ble(
   struct device *dev,
   struct sx1280_platform_data *pdata
 ) {
+  dev_dbg(dev, "sx1280_parse_dt_ble");
+
   u32 max_payload_bytes = 37;
   u32 crc_bytes = 3;
   const char *test_payload = "prbs9";
@@ -900,6 +912,8 @@ static int sx1280_parse_dt_flrc(
   struct device *dev,
   struct sx1280_platform_data *pdata
 ) {
+  dev_dbg(dev, "sx1280_parse_dt_flrc");
+
   u32 bitrate_kbs = 1300;
   const char *coding_rate = "3/4";
   const char *bt = "1.0";
@@ -1069,6 +1083,8 @@ static int sx1280_parse_dt_gfsk(
   struct device *dev,
   struct sx1280_platform_data *pdata
 ) {
+  dev_dbg(dev, "sx1280_parse_dt_gfsk");
+
   /* Populate defaults for GFSK mode. */
   u16 bitrate_kbs = 2000;
   u16 bandwidth_khz = 2400;
@@ -1219,6 +1235,8 @@ static int sx1280_parse_dt_lora(
   struct device *dev,
   struct sx1280_platform_data *pdata
 ) {
+  dev_dbg(dev, "sx1280_parse_dt_lora");
+
   u32 spreading_factor = 12;
   u32 bandwidth_khz = 1600;
   const char *coding_rate = "4/8";
@@ -1376,6 +1394,8 @@ static int sx1280_parse_dt_ranging(
   struct device *dev,
   struct sx1280_platform_data *pdata
 ) {
+  dev_dbg(dev, "sx1280_parse_dt_ranging");
+
   return 0;
 }
 
@@ -1383,6 +1403,8 @@ static int sx1280_parse_dt(
   struct device *dev,
   struct sx1280_platform_data *pdata
 ) {
+  dev_dbg(dev, "sx1280_parse_dt");
+
   struct device_node *node = dev->of_node;
   int err;
 
@@ -1510,6 +1532,8 @@ static int sx1280_parse_gpios(
   struct sx1280_priv *priv,
   bool dt
 ) {
+  dev_dbg(dev, "sx1280_parse_gpios");
+
   int err;
 
   /*
@@ -1628,6 +1652,8 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
   struct sx1280_platform_data *pdata = &priv->pdata;
   int err;
 
+  dev_dbg(&spi->dev, "sx1280_setup");
+
   /*
    * Switch the chip into STDBY_RC mode.
    *
@@ -1739,6 +1765,8 @@ static const struct net_device_ops sx1280_netdev_ops = {
  * @returns 0 on success, error code otherwise.
  */
 static int sx1280_probe(struct spi_device *spi) {
+  dev_dbg(&spi->dev, "sx1280_probe");
+
   int err;
 
   /* Allocate a new net device (without registering, yet). */
@@ -1871,6 +1899,8 @@ err_platform:
 }
 
 static void sx1280_remove(struct spi_device *spi) {
+  dev_dbg(&spi->dev, "sx1280_remove");
+
   struct sx1280_priv *priv = spi_get_drvdata(spi);
 
   /* TODO: Potentially need to free GPIOs for platform data instances. */
