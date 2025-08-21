@@ -7,9 +7,8 @@ if [ "$#" -ne 1 ]; then
   exit 1
 fi
 
-DTS="$1"
 TREE="/sys/kernel/config/device-tree/overlays/sx1280"
 
-dtc -@ -I dts -O dtb -o /tmp/overlay.dtbo overlay.dts
+dtc -@ -I dts -O dtb -o /tmp/overlay.dtbo "$1"
 mkdir -p "$TREE"
 cat /tmp/overlay.dtbo > "$TREE/dtbo"
