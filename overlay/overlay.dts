@@ -1,0 +1,28 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+  fragment@0 {
+    target = <&spi0>;
+
+    __overlay__ {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      sx1280: sx@0 {
+        compatible = "semtech,sx1280";
+        reg = <0>;
+
+        busy-gpios = <&gpio 17 0>;
+        dio-gpios = <&gpio 22 0>, <0 0>, <0 0>;
+      };
+    };
+  };
+
+  fragment@1 {
+    target = <&spidev0>;
+    __overlay__ {
+      status = "disabled";
+    };
+  };
+};
