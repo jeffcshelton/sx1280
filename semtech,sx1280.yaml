@@ -264,7 +264,7 @@ properties:
       disable-crc:
         type: boolean
 
-      iq-inverted:
+      invert-iq:
         type: boolean
 
 required:
