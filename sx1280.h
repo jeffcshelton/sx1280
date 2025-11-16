@@ -124,12 +124,12 @@ enum sx1280_whitening {
 };
 
 struct sx1280_gfsk_packet_params {
-  enum sx1280_preamble_length preamble_len;
-  enum sx1280_sync_word_length sync_word_len;
+  enum sx1280_preamble_length preamble_length;
+  enum sx1280_sync_word_length sync_word_length;
   enum sx1280_sync_word_combination sync_word_match;
   enum sx1280_gfsk_header_type header_type;
-  u8 payload_len;
-  enum sx1280_gfsk_crc_length crc_len;
+  u8 payload_length;
+  enum sx1280_gfsk_crc_length crc_length;
   enum sx1280_whitening whitening;
 };
 
@@ -201,9 +201,9 @@ enum sx1280_lora_iq {
 };
 
 struct sx1280_lora_packet_params {
-  u8 preamble_len;
+  u8 preamble_length;
   enum sx1280_lora_header_type header_type;
-  u8 payload_len;
+  u8 payload_length;
   enum sx1280_lora_crc crc;
   enum sx1280_lora_iq invert_iq;
 };
@@ -325,7 +325,7 @@ union sx1280_modulation_params {
   u8 raw[3];
 };
 
-struct sx1280_gfsk_packet_status {
+struct sx1280_packet_status_ble_gfsk_flrc {
   u8 rfu;
   u8 rssi_sync;
   u8 errors;
@@ -333,14 +333,14 @@ struct sx1280_gfsk_packet_status {
   u8 sync;
 };
 
-struct sx1280_lora_packet_status {
+struct sx1280_packet_status_lora {
   u8 rssi_sync;
   u8 snr_pkt;
 };
 
 union sx1280_packet_status {
-  struct sx1280_gfsk_packet_status gfsk;
-  struct sx1280_lora_packet_status lora;
+  struct sx1280_packet_status_ble_gfsk_flrc ble_gfsk_flrc;
+  struct sx1280_packet_status_lora lora;
   u8 raw[5];
 };
 
@@ -372,6 +372,22 @@ enum sx1280_standby {
 #define SX1280_IRQ_RX_TX_TIMEOUT (1 << 14)
 #define SX1280_IRQ_PREAMBLE_DETECTED (1 << 15)
 #define SX1280_IRQ_ADVANCED_RANGING_DONE (1 << 15)
+
+#define SX1280_STATUS_CIRCUIT_MODE(status) ((status) >> 5 & 0x7)
+#define SX1280_STATUS_COMMAND_STATUS(status) ((status) >> 2 & 0x7)
+
+#define SX1280_CIRCUIT_MODE_STDBY_RC   0x2
+#define SX1280_CIRCUIT_MODE_STDBY_XOSC 0x3
+#define SX1280_CIRCUIT_MODE_FS         0x4
+#define SX1280_CIRCUIT_MODE_RX         0x5
+#define SX1280_CIRCUIT_MODE_TX         0x6
+
+#define SX1280_COMMAND_STATUS_TX_PROCESSED     0x1
+#define SX1280_COMMAND_STATUS_DATA_AVAILABLE   0x2
+#define SX1280_COMMAND_STATUS_TIMEOUT          0x3
+#define SX1280_COMMAND_STATUS_PROCESSING_ERROR 0x4
+#define SX1280_COMMAND_STATUS_EXEC_FAILURE     0x5
+#define SX1280_COMMAND_STATUS_TX_DONE          0x6
 
 // Register reading macros.
 #define BITMASK(a, b) (((1 << ((b) - (a) + 1)) - 1) << (7 - (b)))
@@ -535,6 +551,7 @@ struct sx1280_platform_data {
 
   unsigned int busy_gpio;
   int dio_gpios[3];
+  unsigned int reset_gpio;
 
   struct sx1280_ble_params ble;
   struct sx1280_gfsk_params gfsk;

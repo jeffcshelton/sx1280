@@ -1,5 +1,4 @@
 #!/usr/bin/env sh
-
 set -e
 
 if [ "$#" -ne 1 ]; then
@@ -12,3 +11,6 @@ TREE="/sys/kernel/config/device-tree/overlays/sx1280"
 dtc -@ -I dts -O dtb -o /tmp/overlay.dtbo "$1"
 mkdir -p "$TREE"
 cat /tmp/overlay.dtbo > "$TREE/dtbo"
+
+STATUS=$(cat "$TREE/status")
+echo "status: $STATUS"

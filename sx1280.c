@@ -10,10 +10,13 @@
 
 #include <linux/device.h>
 #include <linux/init.h>
+#include <linux/if_arp.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <linux/module.h>
-#include <linux/spi/spi.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
+#include <linux/spi/spi.h>
 #include <net/cfg80211.h>
 
 #include "sx1280.h"
@@ -26,6 +29,7 @@ struct sx1280_priv {
 
   struct gpio_desc *busy;
   struct gpio_desc *dio;
+  struct gpio_desc *reset;
   int dio_index;
   int irq;
 
@@ -38,16 +42,25 @@ struct sx1280_priv {
   struct workqueue_struct *xmit_queue;
   struct work_struct tx_work;
 
-  spinlock_t lock;
+  /*
+   * Mutex that locks all uninterruptible operations.
+   *
+   * This mutex should be locked before every transaction involving the chip,
+   * especially in IRQ handlers.
+   */
+  struct mutex lock;
 };
 
 /****************
 * SPI Functions *
 ****************/
 
+/**
+ * @context process & locked
+ */
 static int sx1280_get_status(struct spi_device *spi, u8 *status) {
-  u8 tx[] = { SX1280_CMD_GET_STATUS };
-  u8 rx[1];
+  u8 tx[2] = { SX1280_CMD_GET_STATUS };
+  u8 rx[2];
 
   struct spi_transfer xfer = {
     .tx_buf = tx,
@@ -61,12 +74,15 @@ static int sx1280_get_status(struct spi_device *spi, u8 *status) {
   }
 
   if (status) {
-    *status = rx[0];
+    *status = rx[1];
   }
 
   return 0;
 }
 
+/**
+ * @context process & locked
+ */
 static int sx1280_write_register(
   struct spi_device *spi,
   u16 addr,
@@ -537,23 +553,100 @@ static int sx1280_wait_on_gpio(
 *******************/
 
 static int sx1280_open(struct net_device *dev) {
-  dev_dbg(&dev->dev, "sx1280_open");
+  dev_dbg(
+    &dev->dev,
+    "ndo_open called by process: %s (pid %d)\n",
+    current->comm,
+    current->pid
+  );
+
+  if (current->parent) {
+    dev_dbg(
+      &dev->dev,
+      "  parent process: %s (pid %d)\n",
+      current->parent->comm,
+      current->parent->pid
+    );
+  }
 
   netif_start_queue(dev);
   return 0;
 }
 
 static int sx1280_stop(struct net_device *dev) {
-  dev_dbg(&dev->dev, "sx1280_stop");
+  dev_dbg(
+    &dev->dev,
+    "ndo_stop called by process: %s (pid %d)\n",
+    current->comm,
+    current->pid
+  );
+
+  if (current->parent) {
+    dev_dbg(
+      &dev->dev,
+      "  parent process: %s (pid %d)\n",
+      current->parent->comm,
+      current->parent->pid
+    );
+  }
 
   netif_stop_queue(dev);
   return 0;
 }
 
+/**
+ * Called to transmit a single packet buffer.
+ * @context atomic | process
+ */
 static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
-  dev_dbg(&dev->dev, "sx1280_xmit");
-
   struct sx1280_priv *priv = netdev_priv(dev);
+
+  /*
+   * Since the netdev is configured as an Ethernet device, the SKB is guaranteed
+   * to be wrapped with an Ethernet header.
+   */
+  struct ethhdr *ethh = (struct ethhdr *) skb->data;
+  u16 protocol = ntohs(ethh->h_proto);
+
+  /* Log information about the packet for debugging. */
+  dev_dbg(&dev->dev, "xmit: proto=0x%04x, len=%d\n", protocol, skb->len);
+  dev_dbg(&dev->dev, "  mac: src=%pM, dst=%pM\n", ethh->h_source, ethh->h_dest);
+
+  void *body = skb->data + sizeof(struct ethhdr);
+
+  /* If the protocol is a */
+  switch (protocol) {
+  case ETH_P_IP:;
+    struct iphdr *iph = (struct iphdr *) body;
+    dev_dbg(
+      &dev->dev,
+      "  ipv4: src=%pI4, dst=%pI4\n",
+      &iph->saddr,
+      &iph->daddr
+    );
+
+    break;
+  case ETH_P_IPV6:;
+    struct ipv6hdr *ip6h = (struct ipv6hdr *) body;
+    dev_dbg(
+      &dev->dev,
+      "  ipv6: src=%pI6c, dst=%pI6c\n",
+      &ip6h->saddr,
+      &ip6h->daddr
+    );
+
+    break;
+  case ETH_P_ARP:;
+    struct arphdr *arph = (struct arphdr *) body;
+    dev_dbg(
+      &dev->dev,
+      "  arp: proto=0x%04x, op=%u\n",
+      ntohs(arph->ar_pro),
+      ntohs(arph->ar_op)
+    );
+
+    break;
+  }
 
   /*
    * Stop the packet queue, applying backpressure to the kernel networking stack
@@ -569,12 +662,13 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
   /*
    * Check if there is already a packet being transmitted.
    *
-   * This is not supposed to happen, as the kernel should not call `sx1280_xmit`
-   * after the queue is stopped. If it does happen, backpressure is applied and
-   * a warning is printed.
+   * Generally, the kernel will not call `ndo_start_xmit` if the packet queue is
+   * stopped. However, if there are packets in flight before the queue was
+   * stopped, they will still arrive here. In that case, apply backpressure to
+   * the networking stack.
    */
   if (priv->tx_skb) {
-    dev_warn(&dev->dev, "Packet transmission requested after queue frozen.\n");
+    dev_dbg(&dev->dev, "packet transmission requested after queue frozen\n");
     return NETDEV_TX_BUSY;
   }
 
@@ -586,21 +680,24 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
 
 static void sx1280_tx_work(struct work_struct *work) {
   struct sx1280_priv *priv = container_of(work, struct sx1280_priv, tx_work);
+  struct net_device *netdev = priv->netdev;
   struct spi_device *spi = priv->spi;
   struct sk_buff *skb = priv->tx_skb;
   int err;
 
-  dev_dbg(&spi->dev, "sx1280_tx_work");
+  dev_dbg(&spi->dev, "sx1280_tx_work\n");
 
   if (!skb) {
-    dev_warn(&priv->netdev->dev, "Transmission queued without packet SKB.\n");
+    netdev_warn(netdev, "transmission queued without packet skb\n");
     return;
   }
 
   if ((err = sx1280_wait_on_gpio(priv->busy, 0, 10000))) {
-    dev_err(&priv->spi->dev, "Wait for busy pin timed out.");
-    return;
+    dev_err(&spi->dev, "wait for busy pin timed out");
+    goto drop;
   }
+
+  dev_dbg(&spi->dev, "tx: busy pulled low\n");
 
   /*
    * Check that the chip is not in ranging mode.
@@ -609,23 +706,20 @@ static void sx1280_tx_work(struct work_struct *work) {
   if (priv->mode == SX1280_MODE_RANGING) {
     dev_warn(
       &priv->netdev->dev,
-      "Packet transmission requested in ranging mode.\n"
+      "packet transmission requested in ranging mode\n"
     );
-    dev_kfree_skb(skb);
-    return;
+    goto drop;
   }
 
   /*
    * Write the packet data from the SKB into the chip's data buffer.
-   *
-   * The buffer is a maximum of 256 bytes long.
-   * The SKB is restricted to at most 256 bytes by the configuration in
-   * `sx1280_probe` that specifies the MTU as 256 bytes.
    */
   if ((err = sx1280_write_buffer(spi, 0, skb->data, skb->len))) {
-    dev_err(&spi->dev, "Failed to write packet data to buffer.\n");
-    return;
+    dev_err(&spi->dev, "failed to write packet data to buffer\n");
+    goto drop;
   }
+
+  dev_dbg(&spi->dev, "wrote to buffer\n");
 
   err = sx1280_set_tx(
     spi,
@@ -634,59 +728,121 @@ static void sx1280_tx_work(struct work_struct *work) {
   );
 
   if (err) {
-    dev_err(&spi->dev, "Failed to transmit packet.\n");
-    return;
+    dev_err(&spi->dev, "failed to transmit packet\n");
+    goto drop;
   }
 
-  /* Free the SKB. */
-  dev_kfree_skb(skb);
+  return;
 
-  /* Restart the packet queue so that xmit may be called again. */
+drop:
+  netdev->stats.tx_dropped++;
+  dev_kfree_skb(skb);
   netif_start_queue(priv->netdev);
+  dev_dbg(&spi->dev, "restarted netdev queue\n");
 }
 
 /**
- * Interrupt handler for the only used DIO pin.
+ * Sets the chip into continuous RX mode to listen for packets.
+ * @context process & locked
+ */
+static int sx1280_listen(struct spi_device *spi) {
+  int err = sx1280_set_rx(spi, 0x1, 0xFFFF);
+  if (err) {
+    dev_dbg(&spi->dev, "failed to transition to listen\n");
+  }
+
+  return err;
+}
+
+/**
+ * Threaded interrupt handler for DIO interrupt requests.
+ * @context process
  */
 static irqreturn_t sx1280_irq(int irq, void *dev_id) {
   int err;
 
   struct sx1280_priv *priv = (struct sx1280_priv *) dev_id;
+  struct net_device *netdev = priv->netdev;
   struct spi_device *spi = priv->spi;
+
+  mutex_lock(&priv->lock);
+
   u16 mask;
-
-  dev_dbg(&spi->dev, "sx1280_irq");
-
   if ((err = sx1280_get_irq_status(priv->spi, &mask)) < 0) {
-    dev_err(&spi->dev, "Failed to get IRQ status.\n");
-    return err;
+    dev_err(&spi->dev, "failed to get IRQ status\n");
+    goto unlock;
   }
 
-  dev_info(&spi->dev, "Received interrupt with mask %x.\n", mask);
+  dev_info(&spi->dev, "received interrupt with mask 0x%04x\n", mask);
 
   /*
    * Handle interrupts specified by the mask.
    */
 
   if (mask & SX1280_IRQ_TX_DONE) {
-    /*
-     * Nullify the Tx SKB in preparation for the next packet.
-     *
-     * Here, the driver does not yet wake the queue because the transmission is
-     * not finished.
-     */
+    /* Update netdev stats. */
+    netdev->stats.tx_packets++;
+    netdev->stats.tx_bytes += priv->tx_skb->len;
+
+    /* Free the previous Tx packet in preparation for the next. */
+    dev_kfree_skb(priv->tx_skb);
     priv->tx_skb = NULL;
+
+    /* Switch back into listening. */
+    err = sx1280_listen(spi);
+
+    /* Restart the Tx packet queue. */
+    netif_start_queue(netdev);
   }
 
   if (mask & SX1280_IRQ_RX_DONE) {
+    if (
+      (mask & SX1280_IRQ_SYNC_WORD_ERROR)
+      || (mask & SX1280_IRQ_HEADER_ERROR)
+      || (mask & SX1280_IRQ_CRC_ERROR)
+    ) {
+      netdev_dbg(netdev, "rx error: mask=0x%04x\n", mask);
+      netdev->stats.rx_errors += 1;
+      goto rx_error;
+    }
+
     union sx1280_packet_status status;
 
     if ((err = sx1280_get_packet_status(spi, &status)) < 0) {
-      dev_err(&spi->dev, "Failed to get packet status.\n");
-      goto error;
+      dev_err(&spi->dev, "failed to get packet status\n");
+      goto rx_error;
     }
 
     /* TODO: Set the RSSI to be publicly accessible. */
+    switch (priv->mode) {
+    case SX1280_MODE_BLE:
+    case SX1280_MODE_FLRC:
+    case SX1280_MODE_GFSK:
+      netdev_dbg(
+        netdev,
+        "rx: rssi_sync=0x%02x, errors=0x%02x, status=0x%02x, sync=0x%02x\n",
+        status.ble_gfsk_flrc.rssi_sync,
+        status.ble_gfsk_flrc.errors,
+        status.ble_gfsk_flrc.status,
+        status.ble_gfsk_flrc.sync
+      );
+
+      break;
+    case SX1280_MODE_LORA:
+      netdev_dbg(
+        netdev,
+        "rx: rssi=%d, snr_pkt=%d\n",
+        status.lora.rssi_sync,
+        status.lora.snr_pkt
+      );
+
+      break;
+    case SX1280_MODE_RANGING:
+      netdev_err(priv->netdev, "received packet in ranging mode\n");
+      err = -EIO;
+      goto rx_error;
+    }
+
     u8 payload_start, payload_len;
 
     /*
@@ -696,22 +852,24 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
      * in setup, but length has to be fetched so it might as well use the
      * offset provided.
      */
-    err = sx1280_get_rx_buffer_status(
-      spi,
-      &payload_len,
-      &payload_start
-    );
-
+    err = sx1280_get_rx_buffer_status(spi, &payload_len, &payload_start);
     if (err) {
-      dev_err(&spi->dev, "Failed to get RX buffer status.\n");
-      goto error;
+      dev_err(&spi->dev, "failed to get RX buffer status\n");
+      goto rx_error;
     }
+
+    netdev_dbg(
+      netdev,
+      "  start=0x%02x, len=%u\n",
+      payload_start,
+      payload_len
+    );
 
     /* Allocate an SKB to hold the packet data and pass it to userspace. */
     struct sk_buff *skb = dev_alloc_skb((unsigned int) payload_len);
     if (!skb) {
-      dev_err(&spi->dev, "Failed to allocate SKB for RX packet.\n");
-      goto error;
+      dev_err(&spi->dev, "failed to allocate SKB for RX packet\n");
+      goto rx_error;
     }
 
     /* Read the RX packet data directly into the SKB. */
@@ -724,36 +882,22 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
     );
 
     if (err) {
-      dev_err(&spi->dev, "Failed to read RX buffer.\n");
-      goto error;
+      dev_err(&spi->dev, "failed to read RX buffer\n");
+      goto rx_error;
     }
 
-    skb->dev = priv->netdev;
-    skb->protocol = ETH_P_IP; /* Change to dynamically do this. */
+    skb->dev = netdev;
+    skb->protocol = eth_type_trans(skb, netdev);
     skb->ip_summed = CHECKSUM_NONE;
+
+    /* Update netdev stats. */
+    netdev->stats.rx_packets++;
+    netdev->stats.rx_bytes += payload_len;
 
     netif_rx(skb);
   }
 
-  if (mask & SX1280_IRQ_SYNC_WORD_VALID) {
-
-  }
-
-  if (mask & SX1280_IRQ_SYNC_WORD_ERROR) {
-
-  }
-
-  if (mask & SX1280_IRQ_HEADER_VALID) {
-
-  }
-
-  if (mask & SX1280_IRQ_HEADER_ERROR) {
-
-  }
-
-  if (mask & SX1280_IRQ_CRC_ERROR) {
-
-  }
+rx_error:
 
   if (mask & SX1280_IRQ_RANGING_SLAVE_RESPONSE_DONE) {
 
@@ -784,7 +928,7 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
   }
 
   if (mask & SX1280_IRQ_RX_TX_TIMEOUT) {
-
+    
   }
 
   if (mask & SX1280_IRQ_PREAMBLE_DETECTED) {
@@ -794,9 +938,12 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
     }
   }
 
-error:
   /* Acknowledge all interrupts. */
-  sx1280_clear_irq_status(priv->spi, 0xFF);
+  sx1280_clear_irq_status(priv->spi, 0xFFFF);
+  dev_dbg(&spi->dev, "cleared IRQ status\n");
+
+unlock:
+  mutex_unlock(&priv->lock);
   return IRQ_HANDLED;
 }
 
@@ -1186,7 +1333,7 @@ static int sx1280_parse_dt_gfsk(
     return -EINVAL;
   }
 
-  pkt->preamble_len = (enum sx1280_preamble_length) (preamble_bits << 2);
+  pkt->preamble_length = (enum sx1280_preamble_length) (preamble_bits << 2);
 
   /* Sync word length */
   if (sync_word_bytes < 1 || sync_word_bytes > 5) {
@@ -1194,7 +1341,7 @@ static int sx1280_parse_dt_gfsk(
     return -EINVAL;
   }
 
-  pkt->sync_word_len = ((sync_word_bytes - 1) * 2);
+  pkt->sync_word_length = ((sync_word_bytes - 1) * 2);
 
   /* Sync word combination */
   pkt->sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_OFF;
@@ -1214,10 +1361,10 @@ static int sx1280_parse_dt_gfsk(
     : SX1280_RADIO_PACKET_VARIABLE_LENGTH;
 
   /* Payload length */
-  pkt->payload_len = max_payload_bytes;
+  pkt->payload_length = max_payload_bytes;
 
   /* CRC bytes */
-  pkt->crc_len = (enum sx1280_gfsk_crc_length) (crc_bytes << 4);
+  pkt->crc_length = (enum sx1280_gfsk_crc_length) (crc_bytes << 4);
 
   /* Whitening */
   pkt->whitening = disable_whitening
@@ -1359,7 +1506,7 @@ static int sx1280_parse_dt_lora(
    * would ordinarily be representable, but 255 is itself an excessively large
    * preamble size (8 is typical).
    */
-  pkt->preamble_len = (pb_exp << 4) | (u8) pb_mant;
+  pkt->preamble_length = (pb_exp << 4) | (u8) pb_mant;
 
   /* Header type. */
   pkt->header_type = implicit_header
@@ -1375,7 +1522,7 @@ static int sx1280_parse_dt_lora(
     return -EINVAL;
   }
 
-  pkt->payload_len = max_payload_bytes;
+  pkt->payload_length = max_payload_bytes;
 
   /* CRC enabling. */
   pkt->crc = disable_crc
@@ -1413,7 +1560,7 @@ static int sx1280_parse_dt(
   s32 power_dbm = 13;
   u32 ramp_time_us = 2;
   u32 rf_freq_hz = 2400000000;
-  u32 startup_timeout_us = 2000;
+  u32 startup_timeout_us = 10000;
   u32 tx_timeout_us = 1000;
 
   /* Overwrite the default values if they are specified. */
@@ -1469,6 +1616,9 @@ static int sx1280_parse_dt(
    * natively understands.
    */
   pdata->rf_freq = SX1280_FREQ_HZ_TO_PLL(rf_freq_hz);
+
+  /* Startup timeout */
+  pdata->startup_timeout_us = startup_timeout_us;
 
   /*
    * Convert the timeout and period base into nanoseconds so that an integer
@@ -1573,6 +1723,12 @@ static int sx1280_parse_gpios(
         break;
       }
     }
+
+    priv->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
+    if (IS_ERR(priv->reset)) {
+      dev_err(dev, "Failed to configure GPIO for the reset pin.\n");
+      return PTR_ERR(priv->reset);
+    }
   } else {
     /*
      * If platform data is used, the GPIOs are passed as integers.
@@ -1606,17 +1762,23 @@ static int sx1280_parse_gpios(
       priv->dio = dio;
       break;
     }
+
+    priv->reset = gpio_to_desc(priv->pdata.reset_gpio);
+    if (!priv->reset || (err = gpiod_direction_output(priv->reset, 1))) {
+      dev_err(dev, "Failed to configure GPIO for reset.\n");
+      return err;
+    }
   }
 
   /* Check that at least one DIO was set. */
   if (!priv->dio) {
-    dev_err(dev, "No DIOs are set in the configuration.\n");
+    dev_err(dev, "no DIOs are set in the configuration\n");
     return -EINVAL;
   }
 
   priv->irq = gpiod_to_irq(priv->dio);
   if ((err = priv->irq) < 0) {
-    dev_err(dev, "Failed to register IRQ for DIO.\n");
+    dev_err(dev, "failed to register IRQ for DIO\n");
     return err;
   }
 
@@ -1643,6 +1805,36 @@ static int sx1280_parse_gpios(
 }
 
 /**
+ * Performs a hardware reset by toggling the NRESET pin and waiting for BUSY.
+ * @param priv - The internal SX1280 driver structure.
+ */
+static int sx1280_reset(struct sx1280_priv *priv) {
+  int err;
+
+  netdev_dbg(priv->netdev, "resetting hardware\n");
+
+  /* Toggle NRESET. */
+  gpiod_set_value_cansleep(priv->reset, 1);
+  usleep_range(100, 150);
+  gpiod_set_value_cansleep(priv->reset, 0);
+
+  ktime_t start = ktime_get();
+
+  /* Wait for BUSY = 0. */
+  err = sx1280_wait_on_gpio(priv->busy, 0, priv->pdata.startup_timeout_us);
+  if (err) {
+    netdev_err(priv->netdev, "failed to reset, timeout exceeded\n");
+    return err;
+  }
+
+  ktime_t end = ktime_get();
+  s64 reset_time = ktime_to_us(ktime_sub(end, start));
+
+  netdev_dbg(priv->netdev, "reset completed in %lld us\n", reset_time);
+  return 0;
+}
+
+/**
  * Performs the chip setup.
  * @param priv - The internal SX1280 driver structure.
  * @param mode - The mode in which to put the SX1280.
@@ -1652,29 +1844,46 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
   struct sx1280_platform_data *pdata = &priv->pdata;
   int err;
 
-  dev_dbg(&spi->dev, "sx1280_setup");
+  dev_dbg(&spi->dev, "starting setup\n");
 
-  /*
-   * Switch the chip into STDBY_RC mode.
-   *
-   * While it is always the case that after hard reset, the chip will go to
-   * STDBY_RC, the driver cannot guarantee the state of the chip at this point
-   * as it has not yet had exclusive control over the SPI line.
-   */
-  if ((err = sx1280_set_standby(spi, SX1280_STDBY_RC)) < 0) {
-    dev_err(&spi->dev, "Failed to set into standby.\n");
+  /* Reset the chip. */
+  if ((err = sx1280_reset(priv))) {
     return err;
+  }
+
+  /* Check the status. */
+  u8 status;
+  if ((err = sx1280_get_status(spi, &status))) {
+    dev_err(&spi->dev, "failed to get status\n");
+    return err;
+  }
+
+  dev_dbg(&spi->dev, "status: 0x%02x\n", status);
+
+  /* Extract circuit mode and command status and check for valid values. */
+  u8 circuit_mode = SX1280_STATUS_CIRCUIT_MODE(status);
+  u8 command_status = SX1280_STATUS_COMMAND_STATUS(status);
+  if (circuit_mode != SX1280_CIRCUIT_MODE_STDBY_RC) {
+    dev_err(&spi->dev, "unexpected circuit mode: 0x%02x.\n", circuit_mode);
+    return -EIO;
+  } else if (
+    command_status == SX1280_COMMAND_STATUS_TIMEOUT
+    || command_status == SX1280_COMMAND_STATUS_PROCESSING_ERROR
+    || command_status == SX1280_COMMAND_STATUS_EXEC_FAILURE
+  ) {
+    dev_err(&spi->dev, "unexpected command status: 0x%02x\n", command_status);
+    return -EIO;
   }
 
   /* Set the packet type. */
   if ((err = sx1280_set_packet_type(spi, mode)) < 0) {
-    dev_err(&spi->dev, "Failed to set packet type.\n");
+    dev_err(&spi->dev, "failed to set packet type\n");
     return err;
   }
 
   /* Set the RF frequency. */
   if ((err = sx1280_set_rf_frequency(spi, pdata->rf_freq)) < 0) {
-    dev_err(&spi->dev, "Failed to set RF frequency.\n");
+    dev_err(&spi->dev, "failed to set RF frequency\n");
     return err;
   }
 
@@ -1687,7 +1896,7 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
    * performing another operation, but otherwise will not be overwritten.
    */
   if ((err = sx1280_set_buffer_base_address(spi, 0x0, 0x0)) < 0) {
-    dev_err(&spi->dev, "Failed to set buffer base address.\n");
+    dev_err(&spi->dev, "failed to set buffer base address\n");
     return err;
   }
 
@@ -1726,12 +1935,12 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
    * These may be changed later by ioctl calls.
    */
   if ((err = sx1280_set_modulation_params(spi, mod_params)) < 0) {
-    dev_err(&spi->dev, "Failed to set modulation parameters.\n");
+    dev_err(&spi->dev, "failed to set modulation parameters\n");
     return err;
   }
 
   if ((err = sx1280_set_packet_params(spi, pkt_params)) < 0) {
-    dev_err(&spi->dev, "Failed to set packet parameters.\n");
+    dev_err(&spi->dev, "failed to set packet parameters\n");
     return err;
   }
 
@@ -1746,7 +1955,7 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
    * Set TX and RX settings.
    */
   if ((err = sx1280_set_tx_params(spi, pdata->power, pdata->ramp_time)) < 0) {
-    dev_err(&spi->dev, "Failed to set TX parameters.\n");
+    dev_err(&spi->dev, "failed to set TX parameters\n");
     return err;
   }
 
@@ -1765,34 +1974,26 @@ static const struct net_device_ops sx1280_netdev_ops = {
  * @returns 0 on success, error code otherwise.
  */
 static int sx1280_probe(struct spi_device *spi) {
-  dev_dbg(&spi->dev, "sx1280_probe");
-
   int err;
 
   /* Allocate a new net device (without registering, yet). */
-  struct net_device *netdev = alloc_netdev(
-    sizeof(struct sx1280_priv),
-    "sx%d",
-    NET_NAME_UNKNOWN,
-
-    /* TODO: Evaluate whether this is the right setup handler. */
-    ether_setup
-  );
-
+  struct net_device *netdev = alloc_etherdev(sizeof(struct sx1280_priv));
   if (!netdev) {
     return -ENOMEM;
   }
 
   /* Set properties of the net device. */
   netdev->netdev_ops = &sx1280_netdev_ops;
+  strcpy(netdev->name, "radio%d");
   SET_NETDEV_DEV(netdev, &spi->dev);
+  eth_hw_addr_random(netdev);
 
   /* Create and register the priv structure. */
   struct sx1280_priv *priv = netdev_priv(netdev);
-  priv->mode = SX1280_MODE_GFSK;
+  priv->mode = SX1280_MODE_GFSK; /* default mode after reset */
   priv->netdev = netdev;
   priv->spi = spi;
-  spin_lock_init(&priv->lock);
+  mutex_init(&priv->lock);
 
   /*
    * Attempt to get legacy platform data.
@@ -1803,7 +2004,7 @@ static int sx1280_probe(struct spi_device *spi) {
     priv->pdata = *legacy_platform;
   } else {
     if ((err = sx1280_parse_dt(&spi->dev, &priv->pdata))) {
-      dev_err(&spi->dev, "Failed to parse device tree.\n");
+      dev_err(&spi->dev, "failed to parse device tree\n");
       goto err_platform;
     }
   }
@@ -1812,31 +2013,45 @@ static int sx1280_probe(struct spi_device *spi) {
    * Parse GPIOs according to whether a device tree or platform data is used.
    */
   if ((err = sx1280_parse_gpios(&spi->dev, priv, !legacy_platform))) {
-    dev_err(&spi->dev, "Failed to configure GPIOs.\n");
+    dev_err(&spi->dev, "failed to configure GPIOs\n");
     goto err_gpio;
+  }
+
+  /* Set netdev settings according to device tree. */
+  /* TODO: Allow packet size and mode to be changed from userspace. */
+  switch (priv->pdata.mode) {
+  case SX1280_MODE_BLE:
+    netdev->mtu = priv->pdata.ble.packet.payload_length;
+    break;
+  case SX1280_MODE_FLRC:
+    netdev->mtu = priv->pdata.flrc.packet.payload_length;
+    break;
+  case SX1280_MODE_GFSK:
+    netdev->mtu = priv->pdata.gfsk.packet.payload_length;
+    break;
+  case SX1280_MODE_LORA:
+    netdev->mtu = priv->pdata.lora.packet.payload_length;
+    break;
+  case SX1280_MODE_RANGING:
+    /* Packet transmission is not permitted in ranging mode. */
+    netdev->mtu = 0;
+    break;
   }
 
   /* Define SPI settings according to SX1280 datasheet. */
   spi_set_drvdata(spi, priv);
   spi->bits_per_word = 8;
-  spi->max_speed_hz = 18000000;  /* 18 MHz */
+  spi->max_speed_hz = 5000000;  /* TODO: change to 18 MHz */
   spi->mode = 0;                 /* CPOL = 0, CPHA = 0 */
 
   /* Apply the SPI settings above and handle errors. */
   if ((err = spi_setup(spi))) {
-    dev_err(&spi->dev, "Failed to apply SPI settings.\n");
+    dev_err(&spi->dev, "failed to apply SPI settings\n");
     goto err_spi;
   }
 
-  /* Wait until the chip is not busy to initiate setup. */
-  err = sx1280_wait_on_gpio(priv->busy, 0, priv->pdata.startup_timeout_us);
-  if (err) {
-    dev_err(&spi->dev, "Startup sequence timed out.\n");
-    goto err_busy;
-  }
-
-  if ((err = sx1280_setup(priv, SX1280_MODE_LORA))) {
-    dev_err(&spi->dev, "Failed to set up the SX1280.\n");
+  if ((err = sx1280_setup(priv, priv->pdata.mode))) {
+    dev_err(&spi->dev, "failed to set up the SX1280.\n");
     goto err_setup;
   }
 
@@ -1845,9 +2060,11 @@ static int sx1280_probe(struct spi_device *spi) {
   irq_mask[priv->dio_index - 1] = 0xFFFF;
   err = sx1280_set_dio_irq_params(spi, 0xFFFF, irq_mask);
   if (err) {
-    dev_err(&spi->dev, "Failed to set DIO IRQ parameters.\n");
+    dev_err(&spi->dev, "failed to set DIO IRQ parameters\n");
     goto err_setup;
   }
+
+  netdev_dbg(netdev, "configured DIO%d as IRQ", priv->dio_index);
 
   /* Initialize the work queue and work items for packet transmission. */
   priv->xmit_queue = alloc_workqueue(
@@ -1873,16 +2090,20 @@ static int sx1280_probe(struct spi_device *spi) {
     netdev->name
   );
 
+  mutex_lock(&priv->lock);
+
   /*
    * Set into continuous RX mode. Constantly look for packets and only switch to
    * TX when a packet is queued by userspace.
    */
   if ((err = sx1280_set_rx(spi, 0x1, 0xFFFF)) < 0) {
-    dev_info(&spi->dev, "Failed to set into RX mode.\n");
+    dev_info(&spi->dev, "failed to set into RX mode\n");
     goto err_rx;
   }
 
-  dev_info(&spi->dev, "%s is listening for packets\n.", netdev->name);
+  mutex_unlock(&priv->lock);
+
+  dev_info(&spi->dev, "%s is listening for packets\n", netdev->name);
 
   return 0;
 

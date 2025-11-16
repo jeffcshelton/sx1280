@@ -439,6 +439,7 @@
               - '-DMODULE'
               - '-D__KERNEL__'
               - '-DKBUILD_MODNAME'
+              - '-DDEBUG'
           EOF
         '';
       };

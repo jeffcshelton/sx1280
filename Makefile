@@ -12,6 +12,9 @@ all: modules
 modules:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
 
+debug:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) KCFLAGS="-DDEBUG" modules
+
 clean:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
 
