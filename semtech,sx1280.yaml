@@ -57,41 +57,6 @@ properties:
     type: integer
     enum: [2, 4, 6, 8, 10, 12, 16, 20]
 
-  ble:
-    type: object
-    description: Bluetooth Low Energy configuration
-    properties:
-      max-payload-bytes:
-        type: integer
-        enum: [31, 37, 63, 255]
-
-      crc-bytes:
-        type: integer
-        enum: [0, 3]
-
-      test-payload:
-        type: string
-        enum:
-          - 'prbs9'
-          - 'eyelong10'
-          - 'eyeshort10'
-          - 'prbs15'
-          - 'all1'
-          - 'all0'
-          - 'eyelong01'
-          - 'eyeshort01'
-
-      disable-whitening:
-        type: boolean
-
-      access-address:
-        type: integer
-
-      crc-seed:
-        type: integer
-        maximum: 65535
-        minimum: 0
-
   gfsk:
     type: object
     description: GFSK configuration

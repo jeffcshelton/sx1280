@@ -5,7 +5,7 @@ KERNELDIR ?= /lib/modules/$(KERNELRELEASE)/build
 PWD := $(shell pwd)
 ARCH ?= $(shell uname -m | sed -e s/x86_64/x86/ -e s/aarch64/arm64/)
 
-ccflags-y := -Wall
+ccflags-y := -Wall -Wno-unused-function
 
 all: modules
 

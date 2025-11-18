@@ -8,6 +8,10 @@
  * Copyright (C) 2025 Jeff Shelton
  */
 
+/*
+ * TODO: Jam multiple Ethernet packets into one transmission.
+ */
+
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/if_arp.h>
@@ -20,6 +24,10 @@
 #include <net/cfg80211.h>
 
 #include "sx1280.h"
+
+struct sx1280_config {
+
+};
 
 /* The private, internal structure for the SX1280 driver. */
 struct sx1280_priv {
@@ -49,6 +57,18 @@ struct sx1280_priv {
    * especially in IRQ handlers.
    */
   struct mutex lock;
+
+  /*
+   * Whether the device / driver is fully initialized.
+   *
+   * Used to gate the IRQ handler so that it doesn't receive spurious interrupts
+   * during setup, causing the device / driver to enter an invalid state.
+   */
+  bool initialized;
+
+#ifdef DEBUG
+  struct delayed_work status_check;
+#endif
 };
 
 /****************
@@ -56,9 +76,70 @@ struct sx1280_priv {
 ****************/
 
 /**
+ * Waits for the BUSY pin to be pulled low, so a SPI transfer can begin.
+ *
+ * For short waits, which are expected in the vast majority of cases, this
+ * function quickly busy-loops. Once the time has surpassed 50 us, it starts
+ * sleeping for longer periods before ultimately timing out.
+ *
+ * @context - process & locked
+ */
+static int sx1280_wait_busy(struct sx1280_priv *priv) {
+  ktime_t start = ktime_get();
+  s64 wait = 0;
+
+  while (gpiod_get_value_cansleep(priv->busy)) {
+    wait = ktime_us_delta(ktime_get(), start);
+
+    if (wait < 50) {
+      cpu_relax();
+    } else if (wait < 10000) { /* TODO: no magic numbers */
+      usleep_range(20, 40);
+    } else {
+      return -ETIMEDOUT;
+    }
+  }
+
+  return 0;
+}
+
+/**
+ * Performs an arbitrary SPI transaction with the SX1280, after first waiting
+ * for BUSY = 0 (this is necessary for every transaction).
+ *
+ * @context - process & locked
+ */
+static int sx1280_transfer(
+  struct sx1280_priv *priv,
+  struct spi_transfer *xfers,
+  unsigned int num_xfers
+) {
+  int err;
+  if (!(err = sx1280_wait_busy(priv))) {
+    err = spi_sync_transfer(priv->spi, xfers, num_xfers);
+  }
+
+  return err;
+}
+
+static int sx1280_write(
+  struct sx1280_priv *priv,
+  void *buf,
+  size_t len
+) {
+  int err;
+  if (!(err = sx1280_wait_busy(priv))) {
+    err = spi_write(priv->spi, buf, len);
+  }
+
+  return err;
+}
+
+/**
  * @context process & locked
  */
-static int sx1280_get_status(struct spi_device *spi, u8 *status) {
+static int sx1280_get_status(struct sx1280_priv *priv, u8 *status) {
+  int err;
   u8 tx[2] = { SX1280_CMD_GET_STATUS };
   u8 rx[2];
 
@@ -68,8 +149,8 @@ static int sx1280_get_status(struct spi_device *spi, u8 *status) {
     .len = ARRAY_SIZE(rx),
   };
 
-  int err = spi_sync_transfer(spi, &xfer, 1);
-  if (err) {
+  if ((err = sx1280_transfer(priv, &xfer, 1))) {
+    dev_err(&priv->spi->dev, "GetStatus failed: %d\n", err);
     return err;
   }
 
@@ -84,11 +165,12 @@ static int sx1280_get_status(struct spi_device *spi, u8 *status) {
  * @context process & locked
  */
 static int sx1280_write_register(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u16 addr,
   const u8 *data,
   size_t len
 ) {
+  int err;
   u8 cmd_tx[] = {
     SX1280_CMD_WRITE_REGISTER,
     addr >> 8,
@@ -107,15 +189,21 @@ static int sx1280_write_register(
     }
   };
 
-  return spi_sync_transfer(spi, xfers, ARRAY_SIZE(xfers));
+  if ((err = sx1280_transfer(priv, xfers, ARRAY_SIZE(xfers)))) {
+    dev_err(&priv->spi->dev, "WriteRegister failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_read_register(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u16 addr,
   u8 *data,
   size_t len
 ) {
+  int err;
   u8 cmd_tx[] = {
     SX1280_CMD_READ_REGISTER,
     addr >> 8,
@@ -135,15 +223,21 @@ static int sx1280_read_register(
     }
   };
 
-  return spi_sync_transfer(spi, xfers, ARRAY_SIZE(xfers));
+  if ((err = sx1280_transfer(priv, xfers, ARRAY_SIZE(xfers)))) {
+    dev_err(&priv->spi->dev, "ReadRegister failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_write_buffer(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u8 offset,
   const u8 *data,
   size_t len
 ) {
+  int err;
   u8 cmd_tx[] = {
     SX1280_CMD_WRITE_BUFFER,
     offset
@@ -161,15 +255,21 @@ static int sx1280_write_buffer(
     }
   };
 
-  return spi_sync_transfer(spi, xfers, ARRAY_SIZE(xfers));
+  if ((err = sx1280_transfer(priv, xfers, ARRAY_SIZE(xfers)))) {
+    dev_err(&priv->spi->dev, "WriteBuffer failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_read_buffer(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u8 offset,
   u8 *data,
   size_t len
 ) {
+  int err;
   u8 cmd_tx[3] = { SX1280_CMD_READ_BUFFER, offset };
 
   struct spi_transfer xfers[] = {
@@ -184,37 +284,64 @@ static int sx1280_read_buffer(
     }
   };
 
-  return spi_sync_transfer(spi, xfers, ARRAY_SIZE(xfers));
+  if ((err = sx1280_transfer(priv, xfers, ARRAY_SIZE(xfers)))) {
+    dev_err(&priv->spi->dev, "ReadBuffer failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_sleep(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   bool save_buffer,
   bool save_ram
 ) {
+  int err;
   u8 sleep_config = (save_buffer << 1) | save_ram;
   u8 tx[] = { SX1280_CMD_SET_SLEEP, sleep_config };
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetSleep failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_standby(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u8 mode
 ) {
+  int err;
   u8 tx[] = { SX1280_CMD_SET_STANDBY, mode };
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetStandby failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
-static int sx1280_set_fs(struct spi_device *spi) {
+static int sx1280_set_fs(struct sx1280_priv *priv) {
+  int err;
   u8 tx[] = { SX1280_CMD_SET_FS };
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetFs failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_tx(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u8 period_base,
   u16 period_base_count
 ) {
+  int err;
   u8 tx[] = {
     SX1280_CMD_SET_TX,
     period_base,
@@ -222,14 +349,20 @@ static int sx1280_set_tx(
     period_base_count & 0xFF
   };
 
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetTx failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_rx(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u8 period_base,
   u16 period_base_count
 ) {
+  int err;
   u8 tx[] = {
     SX1280_CMD_SET_RX,
     period_base,
@@ -237,15 +370,21 @@ static int sx1280_set_rx(
     period_base_count & 0xFF
   };
 
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetRx failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_rx_duty_cycle(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u8 period_base,
   u16 rx_period_base_count,
   u16 sleep_period_base_count
 ) {
+  int err;
   u8 tx[] = {
     SX1280_CMD_SET_RX_DUTY_CYCLE,
     period_base,
@@ -255,56 +394,110 @@ static int sx1280_set_rx_duty_cycle(
     sleep_period_base_count & 0xFF
   };
 
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_dbg(&priv->spi->dev, "SetRxDutyCycle failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
-static int sx1280_set_long_preamble(struct spi_device *spi, bool enable) {
+static int sx1280_set_long_preamble(struct sx1280_priv *priv, bool enable) {
+  int err;
   u8 tx[] = { SX1280_CMD_SET_LONG_PREAMBLE, enable };
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetLongPreamble failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
-static int sx1280_set_cad(struct spi_device *spi) {
+static int sx1280_set_cad(struct sx1280_priv *priv) {
+  int err;
   u8 tx[] = { SX1280_CMD_SET_CAD };
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetCad failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
-static int sx1280_set_tx_continuous_wave(struct spi_device *spi) {
+static int sx1280_set_tx_continuous_wave(struct sx1280_priv *priv) {
+  int err;
   u8 tx[] = { SX1280_CMD_SET_TX_CONTINUOUS_WAVE };
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetTxContinuousWave failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
-static int sx1280_set_tx_continuous_preamble(struct spi_device *spi) {
+static int sx1280_set_tx_continuous_preamble(struct sx1280_priv *priv) {
+  int err;
   u8 tx[] = { SX1280_CMD_SET_TX_CONTINUOUS_PREAMBLE };
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetTxContinuousPreamble failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
-static int sx1280_set_auto_tx(struct spi_device *spi, u16 time) {
+static int sx1280_set_auto_tx(struct sx1280_priv *priv, u16 time) {
+  int err;
   u8 tx[] = {
     SX1280_CMD_SET_AUTO_TX,
     time >> 8,
     time & 0xFF
   };
 
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetAutoTx failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
-static int sx1280_set_auto_fs(struct spi_device *spi, bool enable) {
+static int sx1280_set_auto_fs(struct sx1280_priv *priv, bool enable) {
+  int err;
   u8 tx[] = { SX1280_CMD_SET_AUTO_FS, enable };
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetAutoFs failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_packet_type(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   enum sx1280_mode packet_type
 ) {
+  int err;
   u8 tx[] = { SX1280_CMD_SET_PACKET_TYPE, (u8) packet_type };
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetPacketType failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_get_packet_type(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   enum sx1280_mode *packet_type
 ) {
+  int err;
   u8 tx[3] = { SX1280_CMD_GET_PACKET_TYPE };
   u8 rx[3];
 
@@ -314,11 +507,11 @@ static int sx1280_get_packet_type(
     .len = ARRAY_SIZE(rx)
   };
 
-  int err = spi_sync_transfer(spi, &xfer, 1);
-  if (err) {
+  if ((err = sx1280_transfer(priv, &xfer, 1))) {
+    dev_err(&priv->spi->dev, "GetPacketType failed: %d\n", err);
     return err;
   } else if (rx[2] > 0x04) {
-    dev_err(&spi->dev, "Device returned invalid packet type: %d\n", rx[2]);
+    dev_err(&priv->spi->dev, "GetPacketType returned invalid value: %d\n", rx[2]);
     return -EINVAL;
   }
 
@@ -330,9 +523,10 @@ static int sx1280_get_packet_type(
 }
 
 static int sx1280_set_rf_frequency(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u32 freq
 ) {
+  int err;
   u8 tx[] = {
     SX1280_CMD_SET_RF_FREQUENCY,
     freq >> 16,
@@ -340,70 +534,107 @@ static int sx1280_set_rf_frequency(
     freq & 0xFF
   };
 
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetRfFrequency failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_tx_params(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u8 power,
   enum sx1280_ramp_time ramp_time
 ) {
-  u8 tx[] = {
-    SX1280_CMD_SET_TX_PARAMS,
-    power,
-    (u8) ramp_time
-  };
+  int err;
+  u8 tx[] = { SX1280_CMD_SET_TX_PARAMS, power, (u8) ramp_time };
 
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetTxParams failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_cad_params(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   enum sx1280_cad_symbol_num cad_symbol_num
 ) {
+  int err;
   u8 tx[] = { SX1280_CMD_SET_CAD_PARAMS, (u8) cad_symbol_num };
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetCadParams failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_buffer_base_address(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u8 tx_base_addr,
   u8 rx_base_addr
 ) {
+  int err;
   u8 tx[] = {
     SX1280_CMD_SET_BUFFER_BASE_ADDRESS,
     tx_base_addr,
     rx_base_addr
   };
 
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetBufferBaseAddress failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_modulation_params(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   union sx1280_modulation_params params
 ) {
-  u8 tx[4] = { SX1280_CMD_SET_MODULATION_PARAMS };
+  int err;
+  u8 tx[4] = {
+    SX1280_CMD_SET_MODULATION_PARAMS,
+  };
+
+
   memcpy(&tx[1], params.raw, 3);
 
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetModulationParams failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_set_packet_params(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   union sx1280_packet_params params
 ) {
+  int err;
   u8 tx[8] = { SX1280_CMD_SET_PACKET_PARAMS };
   memcpy(&tx[1], params.raw, 7);
 
-  return spi_write(spi, tx, ARRAY_SIZE(tx));
+  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+    dev_err(&priv->spi->dev, "SetPacketParams: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 static int sx1280_get_rx_buffer_status(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u8 *rx_payload_len,
   u8 *rx_start_buffer_ptr
 ) {
+  int err;
   u8 tx[4] = { SX1280_CMD_GET_RX_BUFFER_STATUS };
   u8 rx[4];
 
@@ -413,8 +644,8 @@ static int sx1280_get_rx_buffer_status(
     .len = ARRAY_SIZE(rx)
   };
 
-  int err = spi_sync_transfer(spi, &xfer, 1);
-  if (err) {
+  if ((err = sx1280_transfer(priv, &xfer, 1))) {
+    dev_err(&priv->spi->dev, "GetRxBufferStatus failed: %d\n", err);
     return err;
   }
 
@@ -430,21 +661,30 @@ static int sx1280_get_rx_buffer_status(
 }
 
 static int sx1280_get_packet_status(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   union sx1280_packet_status *packet_status
 ) {
+  int err;
   u8 tx[7] = { SX1280_CMD_GET_PACKET_STATUS };
+  u8 rx[7];
 
   struct spi_transfer xfer = {
     .tx_buf = tx,
-    .rx_buf = packet_status->raw,
-    .len = ARRAY_SIZE(packet_status->raw)
+    .rx_buf = rx,
+    .len = ARRAY_SIZE(rx)
   };
 
-  return spi_sync_transfer(spi, &xfer, 1);
+  if ((err = sx1280_transfer(priv, &xfer, 1))) {
+    dev_err(&priv->spi->dev, "GetPacketStatus failed: %d\n", err);
+    return err;
+  }
+
+  memcpy(&packet_status->raw, &rx[2], 5);
+  return 0;
 }
 
-static int sx1280_get_rssi_inst(struct spi_device *spi, u8 *rssi_inst) {
+static int sx1280_get_rssi_inst(struct sx1280_priv *priv, u8 *rssi_inst) {
+  int err;
   u8 tx[3] = { SX1280_CMD_GET_RSSI_INST };
   u8 rx[3];
 
@@ -454,8 +694,8 @@ static int sx1280_get_rssi_inst(struct spi_device *spi, u8 *rssi_inst) {
     .len = ARRAY_SIZE(rx)
   };
 
-  int err = spi_sync_transfer(spi, &xfer, 1);
-  if (err) {
+  if ((err = sx1280_transfer(priv, &xfer, 1))) {
+    dev_err(&priv->spi->dev, "GetRssiInst failed: %d\n", err);
     return err;
   }
 
@@ -468,10 +708,11 @@ static int sx1280_get_rssi_inst(struct spi_device *spi, u8 *rssi_inst) {
 
 /** Configures the DIO pins to act as interrupts according to their masks. */
 static int sx1280_set_dio_irq_params(
-  struct spi_device *spi,
+  struct sx1280_priv *priv,
   u16 irq_mask,
   u16 dio_mask[3]
 ) {
+  int err;
   u8 tx[] = {
     SX1280_CMD_SET_DIO_IRQ_PARAMS,
     irq_mask >> 8,
@@ -484,11 +725,17 @@ static int sx1280_set_dio_irq_params(
     dio_mask[2] & 0xFF
   };
 
-  return spi_write(spi, tx, sizeof(tx));
+  if ((err = sx1280_write(priv, tx, sizeof(tx)))) {
+    dev_err(&priv->spi->dev, "SetDioIrqParams failed: %d\n", err);
+    return err;
+  }
+
+  return 0;
 }
 
 /** Gets the current state of the IRQ register. */
-static int sx1280_get_irq_status(struct spi_device *spi, u16 *irq_status) {
+static int sx1280_get_irq_status(struct sx1280_priv *priv, u16 *irq_status) {
+  int err;
   u8 tx[4] = { SX1280_CMD_GET_IRQ_STATUS };
   u8 rx[4];
 
@@ -498,99 +745,81 @@ static int sx1280_get_irq_status(struct spi_device *spi, u16 *irq_status) {
     .len = ARRAY_SIZE(rx),
   };
 
-  int err = spi_sync_transfer(spi, &xfer, 1);
-  if (err) {
+  if ((err = sx1280_transfer(priv, &xfer, 1))) {
+    dev_err(&priv->spi->dev, "GetIrqStatus failed: %d\n", err);
     return err;
   }
 
-  /* The IRQ status is returned in big-endian format. */
-  *irq_status = ((u16) rx[2] << 8) | rx[3];
+  if (irq_status) {
+    /* The IRQ status is returned in big-endian format. */
+    *irq_status = ((u16) rx[2] << 8) | rx[3];
+  }
+
   return 0;
 }
 
 /** Clears flags in the IRQ register according to the mask. */
-static int sx1280_clear_irq_status(struct spi_device *spi, u16 irq_mask) {
+static int sx1280_clear_irq_status(struct sx1280_priv *priv, u16 irq_mask) {
+  int err;
   u8 tx[] = {
     SX1280_CMD_CLR_IRQ_STATUS,
     irq_mask >> 8,
     irq_mask & 0xFF
   };
 
-  return spi_write(spi, tx, sizeof(tx));
-}
+  if ((err = sx1280_write(priv, tx, sizeof(tx)))) {
+    dev_err(&priv->spi->dev, "ClearIrqStatus failed: %d\n", err);
+    return err;
+  }
 
-/**
- * Waits for the GPIO to be pulled externally to the specified level within a
- * specified maximum number of microseconds.
- */
-static int sx1280_wait_on_gpio(
-  struct gpio_desc *gpio,
-  int value,
-  u32 timeout_us
-) {
-  u32 elapsed_us = 0;
-
-  /* Perform a measurement of the GPIO every 500 us and check the value. */
-  do {
-    int meas = gpiod_get_value_cansleep(gpio);
-
-    if (meas < 0) {
-      return meas;
-    } else if (meas == value) {
-      return 0;
-    }
-
-    usleep_range(500, 1000);
-    elapsed_us += 500;
-  } while (elapsed_us < timeout_us);
-
-  /* If the loop has fallen through, the loop timed out. */
-  return -ETIMEDOUT;
+  return 0;
 }
 
 /*******************
 * Driver functions *
 *******************/
 
-static int sx1280_open(struct net_device *dev) {
-  dev_dbg(
-    &dev->dev,
+static int sx1280_open(struct net_device *netdev) {
+  netdev_dbg(
+    netdev,
     "ndo_open called by process: %s (pid %d)\n",
     current->comm,
     current->pid
   );
 
   if (current->parent) {
-    dev_dbg(
-      &dev->dev,
+    netdev_dbg(
+      netdev,
       "  parent process: %s (pid %d)\n",
       current->parent->comm,
       current->parent->pid
     );
   }
 
-  netif_start_queue(dev);
+  netif_carrier_on(netdev);
+  netif_start_queue(netdev);
   return 0;
 }
 
-static int sx1280_stop(struct net_device *dev) {
-  dev_dbg(
-    &dev->dev,
+static int sx1280_stop(struct net_device *netdev) {
+  netdev_dbg(
+    netdev,
     "ndo_stop called by process: %s (pid %d)\n",
     current->comm,
     current->pid
   );
 
   if (current->parent) {
-    dev_dbg(
-      &dev->dev,
+    netdev_dbg(
+      netdev,
       "  parent process: %s (pid %d)\n",
       current->parent->comm,
       current->parent->pid
     );
   }
 
-  netif_stop_queue(dev);
+  netif_stop_queue(netdev);
+  netif_carrier_off(netdev);
   return 0;
 }
 
@@ -598,8 +827,8 @@ static int sx1280_stop(struct net_device *dev) {
  * Called to transmit a single packet buffer.
  * @context atomic | process
  */
-static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
-  struct sx1280_priv *priv = netdev_priv(dev);
+static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *netdev) {
+  struct sx1280_priv *priv = netdev_priv(netdev);
 
   /*
    * Since the netdev is configured as an Ethernet device, the SKB is guaranteed
@@ -609,8 +838,8 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
   u16 protocol = ntohs(ethh->h_proto);
 
   /* Log information about the packet for debugging. */
-  dev_dbg(&dev->dev, "xmit: proto=0x%04x, len=%d\n", protocol, skb->len);
-  dev_dbg(&dev->dev, "  mac: src=%pM, dst=%pM\n", ethh->h_source, ethh->h_dest);
+  netdev_dbg(netdev, "xmit: proto=0x%04x, len=%d\n", protocol, skb->len);
+  netdev_dbg(netdev, "  mac: src=%pM, dst=%pM\n", ethh->h_source, ethh->h_dest);
 
   void *body = skb->data + sizeof(struct ethhdr);
 
@@ -618,8 +847,8 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
   switch (protocol) {
   case ETH_P_IP:;
     struct iphdr *iph = (struct iphdr *) body;
-    dev_dbg(
-      &dev->dev,
+    netdev_dbg(
+      netdev,
       "  ipv4: src=%pI4, dst=%pI4\n",
       &iph->saddr,
       &iph->daddr
@@ -628,8 +857,8 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
     break;
   case ETH_P_IPV6:;
     struct ipv6hdr *ip6h = (struct ipv6hdr *) body;
-    dev_dbg(
-      &dev->dev,
+    netdev_dbg(
+      netdev,
       "  ipv6: src=%pI6c, dst=%pI6c\n",
       &ip6h->saddr,
       &ip6h->daddr
@@ -638,8 +867,8 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
     break;
   case ETH_P_ARP:;
     struct arphdr *arph = (struct arphdr *) body;
-    dev_dbg(
-      &dev->dev,
+    netdev_dbg(
+      netdev,
       "  arp: proto=0x%04x, op=%u\n",
       ntohs(arph->ar_pro),
       ntohs(arph->ar_op)
@@ -657,7 +886,7 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
    * one, `netif_wake_queue` is called to tell the kernel that it is permitted
    * to call `sx1280_xmit` once again.
    */
-  netif_stop_queue(dev);
+  netif_stop_queue(netdev);
 
   /*
    * Check if there is already a packet being transmitted.
@@ -668,7 +897,7 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
    * the networking stack.
    */
   if (priv->tx_skb) {
-    dev_dbg(&dev->dev, "packet transmission requested after queue frozen\n");
+    netdev_err(netdev, "packet transmission requested after queue frozen\n");
     return NETDEV_TX_BUSY;
   }
 
@@ -681,74 +910,142 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *dev) {
 static void sx1280_tx_work(struct work_struct *work) {
   struct sx1280_priv *priv = container_of(work, struct sx1280_priv, tx_work);
   struct net_device *netdev = priv->netdev;
-  struct spi_device *spi = priv->spi;
   struct sk_buff *skb = priv->tx_skb;
-  int err;
-
-  dev_dbg(&spi->dev, "sx1280_tx_work\n");
 
   if (!skb) {
     netdev_warn(netdev, "transmission queued without packet skb\n");
     return;
   }
 
-  if ((err = sx1280_wait_on_gpio(priv->busy, 0, 10000))) {
-    dev_err(&spi->dev, "wait for busy pin timed out");
+  mutex_lock(&priv->lock);
+
+  union sx1280_packet_params params;
+  switch (priv->mode) {
+  case SX1280_MODE_FLRC:
+    params.flrc = priv->pdata.flrc.packet;
+
+    /* TODO: Pad FLRC packets less than 6 bytes. */
+    if (skb->len < 6 || skb->len > 127) {
+      netdev_warn(netdev, "invalid FLRC packet size: %d bytes\n", skb->len);
+      goto drop;
+    }
+
+    params.flrc.payload_length = skb->len;
+    break;
+  case SX1280_MODE_GFSK:
+    params.gfsk = priv->pdata.gfsk.packet;
+
+    if (skb->len > 255) {
+      netdev_warn(netdev, "invalid GFSK packet size: %d bytes\n", skb->len);
+      goto drop;
+    }
+
+    params.gfsk.payload_length = skb->len;
+    break;
+  case SX1280_MODE_LORA:
+    params.lora = priv->pdata.lora.packet;
+
+    if (skb->len < 1 || skb->len > 255) {
+      netdev_warn(netdev, "invalid LoRa packet size: %d bytes\n", skb->len);
+      goto drop;
+    }
+
+    params.lora.payload_length = skb->len;
+    break;
+  case SX1280_MODE_RANGING:
+    /* Packets can't be sent in ranging mode. */
+    netdev_warn(netdev, "packet transmission requested in ranging mode\n");
     goto drop;
   }
 
-  dev_dbg(&spi->dev, "tx: busy pulled low\n");
-
-  /*
-   * Check that the chip is not in ranging mode.
-   * Packets can't be sent in ranging mode.
-   */
-  if (priv->mode == SX1280_MODE_RANGING) {
-    dev_warn(
-      &priv->netdev->dev,
-      "packet transmission requested in ranging mode\n"
-    );
+  /* Write packet data and packet parameters onto the chip. */
+  if (
+    sx1280_set_standby(priv, SX1280_STDBY_RC) /* TODO: remove if not necessary */
+    || sx1280_write_buffer(priv, 0x00, skb->data, skb->len)
+    || sx1280_set_packet_params(priv, params)
+    || sx1280_set_tx(priv, priv->pdata.period_base, priv->pdata.period_base_count)
+  ) {
     goto drop;
   }
 
-  /*
-   * Write the packet data from the SKB into the chip's data buffer.
-   */
-  if ((err = sx1280_write_buffer(spi, 0, skb->data, skb->len))) {
-    dev_err(&spi->dev, "failed to write packet data to buffer\n");
-    goto drop;
-  }
+  u8 buffer[256];
+  sx1280_read_buffer(priv, 0x00, buffer, skb->len);
+  netdev_dbg(netdev, "tx: %*ph\n", skb->len, buffer);
 
-  dev_dbg(&spi->dev, "wrote to buffer\n");
-
-  err = sx1280_set_tx(
-    spi,
-    priv->pdata.period_base,
-    priv->pdata.period_base_count
-  );
-
-  if (err) {
-    dev_err(&spi->dev, "failed to transmit packet\n");
-    goto drop;
-  }
-
+  mutex_unlock(&priv->lock);
   return;
 
 drop:
   netdev->stats.tx_dropped++;
   dev_kfree_skb(skb);
+  mutex_unlock(&priv->lock);
   netif_start_queue(priv->netdev);
-  dev_dbg(&spi->dev, "restarted netdev queue\n");
+  netdev_err(netdev, "dropped invalid tx packet\n");
 }
+
+#ifdef DEBUG
+static void sx1280_check_status(struct work_struct *work) {
+  struct sx1280_priv *priv = container_of(
+    work,
+    struct sx1280_priv,
+    status_check.work
+  );
+
+  struct spi_device *spi = priv->spi;
+
+  u8 status;
+  enum sx1280_mode packet_type;
+  u8 rx_len;
+  u8 rx_start;
+  union sx1280_packet_status packet_status;
+  u8 rssi_inst;
+  u16 irq_status;
+
+  ktime_t start = ktime_get();
+
+  mutex_lock(&priv->lock);
+
+  /* Get all statuses throughout the chip. */
+  sx1280_get_status(priv, &status);
+  sx1280_get_packet_type(priv, &packet_type);
+  sx1280_get_rx_buffer_status(priv, &rx_len, &rx_start);
+  sx1280_get_packet_status(priv, &packet_status);
+  sx1280_get_rssi_inst(priv, &rssi_inst);
+  sx1280_get_irq_status(priv, &irq_status);
+
+  dev_dbg(&spi->dev, "status check:\n");
+  dev_dbg(&spi->dev, "  status=0x%02x\n", status);
+  dev_dbg(&spi->dev, "  mode=%u\n", packet_type);
+  dev_dbg(&spi->dev, "  rx_start=0x%02x, rx_len=%u\n", rx_start, rx_len);
+  dev_dbg(&spi->dev, "  pkt_status=%*ph\n", 5, packet_status.raw);
+  dev_dbg(&spi->dev, "  rssi_inst=%u\n", rssi_inst);
+  dev_dbg(&spi->dev, "  irq=0x%04x\n", irq_status);
+
+  ktime_t end = ktime_get();
+  s64 time = ktime_to_us(ktime_sub(end, start));
+  dev_dbg(&spi->dev, "  time=%lld us\n", time);
+
+  mutex_unlock(&priv->lock);
+  schedule_delayed_work(&priv->status_check, HZ);
+}
+
+#endif
 
 /**
  * Sets the chip into continuous RX mode to listen for packets.
  * @context process & locked
  */
-static int sx1280_listen(struct spi_device *spi) {
-  int err = sx1280_set_rx(spi, 0x1, 0xFFFF);
-  if (err) {
-    dev_dbg(&spi->dev, "failed to transition to listen\n");
+static int sx1280_listen(struct sx1280_priv *priv) {
+  int err;
+  union sx1280_packet_params params;
+  params.gfsk = priv->pdata.gfsk.packet;
+  params.gfsk.payload_length = 255; /* expand to other modes */
+
+  if (
+    (err = sx1280_set_packet_params(priv, params))
+    || (err = sx1280_set_rx(priv, SX1280_PERIOD_BASE_15_625_US, 0xFFFF))
+  ) {
+    dev_err(&priv->spi->dev, "failed to transition to listen\n");
   }
 
   return err;
@@ -767,73 +1064,75 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
 
   mutex_lock(&priv->lock);
 
+  /*
+   * The SX1280 can give spurious interrupts during reset, and these should be
+   * ignored.
+   */
   u16 mask;
-  if ((err = sx1280_get_irq_status(priv->spi, &mask)) < 0) {
-    dev_err(&spi->dev, "failed to get IRQ status\n");
+  if (
+    !priv->initialized
+    || (err = sx1280_get_irq_status(priv, &mask))
+  ) {
     goto unlock;
   }
 
-  dev_info(&spi->dev, "received interrupt with mask 0x%04x\n", mask);
+  dev_info(&spi->dev, "interrupt: mask=0x%04x\n", mask);
 
   /*
    * Handle interrupts specified by the mask.
    */
 
-  if (mask & SX1280_IRQ_TX_DONE) {
+  if ((mask & SX1280_IRQ_TX_DONE) || (mask & SX1280_IRQ_RX_TX_TIMEOUT)) {
     /* Update netdev stats. */
-    netdev->stats.tx_packets++;
-    netdev->stats.tx_bytes += priv->tx_skb->len;
+    if (mask & SX1280_IRQ_TX_DONE) {
+      netdev->stats.tx_packets++;
+      netdev->stats.tx_bytes += priv->tx_skb->len;
+    } else {
+      /*
+       * Rx cannot timeout because it's constantly listening.
+       * Any timeouts must be Tx, so the packet should be dropped in this case.
+       */
+      netdev->stats.tx_dropped++;
+      netdev_warn(netdev, "tx timeout (packet dropped)\n");
+    }
 
     /* Free the previous Tx packet in preparation for the next. */
     dev_kfree_skb(priv->tx_skb);
     priv->tx_skb = NULL;
 
     /* Switch back into listening. */
-    err = sx1280_listen(spi);
+    err = sx1280_listen(priv);
 
     /* Restart the Tx packet queue. */
     netif_start_queue(netdev);
   }
 
-  if (mask & SX1280_IRQ_RX_DONE) {
-    if (
-      (mask & SX1280_IRQ_SYNC_WORD_ERROR)
-      || (mask & SX1280_IRQ_HEADER_ERROR)
-      || (mask & SX1280_IRQ_CRC_ERROR)
-    ) {
-      netdev_dbg(netdev, "rx error: mask=0x%04x\n", mask);
-      netdev->stats.rx_errors += 1;
-      goto rx_error;
-    }
-
+  if ((mask & SX1280_IRQ_RX_DONE) || (mask & SX1280_IRQ_SYNC_WORD_VALID)) {
     union sx1280_packet_status status;
-
-    if ((err = sx1280_get_packet_status(spi, &status)) < 0) {
-      dev_err(&spi->dev, "failed to get packet status\n");
+    if ((err = sx1280_get_packet_status(priv, &status))) {
       goto rx_error;
     }
 
     /* TODO: Set the RSSI to be publicly accessible. */
     switch (priv->mode) {
-    case SX1280_MODE_BLE:
     case SX1280_MODE_FLRC:
     case SX1280_MODE_GFSK:
       netdev_dbg(
         netdev,
         "rx: rssi_sync=0x%02x, errors=0x%02x, status=0x%02x, sync=0x%02x\n",
-        status.ble_gfsk_flrc.rssi_sync,
-        status.ble_gfsk_flrc.errors,
-        status.ble_gfsk_flrc.status,
-        status.ble_gfsk_flrc.sync
+        status.gfsk_flrc.rssi_sync,
+        status.gfsk_flrc.errors,
+        status.gfsk_flrc.status,
+        status.gfsk_flrc.sync
       );
 
       break;
     case SX1280_MODE_LORA:
       netdev_dbg(
         netdev,
-        "rx: rssi=%d, snr_pkt=%d\n",
+        "rx: rssi=%d, snr=%d\n",
         status.lora.rssi_sync,
-        status.lora.snr_pkt
+        status.lora.snr
       );
 
       break;
@@ -841,6 +1140,18 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
       netdev_err(priv->netdev, "received packet in ranging mode\n");
       err = -EIO;
       goto rx_error;
+    }
+
+    /* Check errors after checking packet status for accurate debugging. */
+    /* TODO: maybe change this for efficiency after debugging */
+    if (
+      (mask & SX1280_IRQ_SYNC_WORD_ERROR)
+      || (mask & SX1280_IRQ_HEADER_ERROR)
+      || (mask & SX1280_IRQ_CRC_ERROR)
+    ) {
+      netdev_dbg(netdev, "rx error: mask=0x%04x\n", mask);
+      netdev->stats.rx_errors += 1;
+      // goto rx_error;
     }
 
     u8 payload_start, payload_len;
@@ -852,39 +1163,32 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
      * in setup, but length has to be fetched so it might as well use the
      * offset provided.
      */
-    err = sx1280_get_rx_buffer_status(spi, &payload_len, &payload_start);
+    err = sx1280_get_rx_buffer_status(priv, &payload_len, &payload_start);
     if (err) {
-      dev_err(&spi->dev, "failed to get RX buffer status\n");
       goto rx_error;
     }
-
-    netdev_dbg(
-      netdev,
-      "  start=0x%02x, len=%u\n",
-      payload_start,
-      payload_len
-    );
 
     /* Allocate an SKB to hold the packet data and pass it to userspace. */
     struct sk_buff *skb = dev_alloc_skb((unsigned int) payload_len);
     if (!skb) {
-      dev_err(&spi->dev, "failed to allocate SKB for RX packet\n");
+      netdev_err(netdev, "failed to allocate SKB for RX packet\n");
       goto rx_error;
     }
 
     /* Read the RX packet data directly into the SKB. */
     void *rx_data = skb_put(skb, (unsigned int) payload_len);
     err = sx1280_read_buffer(
-      spi,
+      priv,
       payload_start,
       (u8 *) rx_data,
       (size_t) payload_len
     );
 
     if (err) {
-      dev_err(&spi->dev, "failed to read RX buffer\n");
       goto rx_error;
     }
+
+    netdev_dbg(netdev, "rx: %*ph\n", payload_len, rx_data);
 
     skb->dev = netdev;
     skb->protocol = eth_type_trans(skb, netdev);
@@ -927,10 +1231,6 @@ rx_error:
 
   }
 
-  if (mask & SX1280_IRQ_RX_TX_TIMEOUT) {
-    
-  }
-
   if (mask & SX1280_IRQ_PREAMBLE_DETECTED) {
     /* If in ranging mode, the mask is instead for "Advanced Ranging Done". */
     if (priv->mode == SX1280_MODE_RANGING) {
@@ -939,8 +1239,7 @@ rx_error:
   }
 
   /* Acknowledge all interrupts. */
-  sx1280_clear_irq_status(priv->spi, 0xFFFF);
-  dev_dbg(&spi->dev, "cleared IRQ status\n");
+  sx1280_clear_irq_status(priv, 0xFFFF);
 
 unlock:
   mutex_unlock(&priv->lock);
@@ -950,116 +1249,13 @@ unlock:
 #define CONCAT32(a, b) (((u32) (a) << 16) | (u32) (b))
 #define MATCH2(a, b, v) case CONCAT32(a, b): mod->bitrate_bandwidth = v; break;
 
-static int sx1280_parse_dt_ble(
-  struct device *dev,
-  struct sx1280_platform_data *pdata
-) {
-  dev_dbg(dev, "sx1280_parse_dt_ble");
-
-  u32 max_payload_bytes = 37;
-  u32 crc_bytes = 3;
-  const char *test_payload = "prbs9";
-  bool disable_whitening = false;
-  u32 access_address = 0;
-  u16 crc_seed = 0;
-
-  struct device_node *child = of_get_child_by_name(dev->of_node, "ble");
-
-  if (child) {
-    of_property_read_u32(child, "max-payload-bytes", &max_payload_bytes);
-    of_property_read_u32(child, "crc-bytes", &crc_bytes);
-    of_property_read_string(child, "test-payload", &test_payload);
-    disable_whitening = of_property_read_bool(child, "disable-whitening");
-    of_property_read_u32(child, "access-address", &access_address);
-    of_property_read_u16(child, "crc-seed", &crc_seed);
-
-    of_node_put(child);
-  }
-
-  struct sx1280_ble_params *ble = &pdata->ble;
-  struct sx1280_gfsk_modulation_params *mod = &ble->modulation;
-  struct sx1280_ble_packet_params *pkt = &ble->packet;
-
-  /* Modulation variables are fully determined for BLE. */
-  *mod = (struct sx1280_gfsk_modulation_params) {
-    .bitrate_bandwidth = SX1280_GFSK_BLE_BR_1_000_BW_1_2,
-    .modulation_index = SX1280_MOD_IND_0_50,
-    .bandwidth_time = SX1280_BT_0_5
-  };
-
-  /* Payload length */
-  switch (max_payload_bytes) {
-  case 31:
-    pkt->payload_length = SX1280_BLE_PAYLOAD_LENGTH_MAX_31_BYTES;
-    break;
-  case 37:
-    pkt->payload_length = SX1280_BLE_PAYLOAD_LENGTH_MAX_37_BYTES;
-    break;
-  case 63:
-    pkt->payload_length = SX1280_BLE_TX_TEST_MODE;
-    break;
-  case 255:
-    pkt->payload_length = SX1280_BLE_PAYLOAD_LENGTH_MAX_255_BYTES;
-    break;
-  default:
-    dev_err(dev, "Invalid value for ble.max-payload-bytes.\n");
-    return -EINVAL;
-  }
-
-  /* CRC */
-  switch (crc_bytes) {
-  case 0:
-    pkt->crc_length = SX1280_BLE_CRC_OFF;
-    break;
-  case 3:
-    pkt->crc_length = SX1280_BLE_CRC_3B;
-    break;
-  default:
-    dev_err(dev, "Invalid value for ble.crc-bytes.\n");
-    return -EINVAL;
-  }
-
-  /* Test payload */
-  if (strcmp(test_payload, "prbs9") == 0) {
-    pkt->test_payload = SX1280_BLE_PRBS_9;
-  } else if (strcmp(test_payload, "eyelong10") == 0) {
-    pkt->test_payload = SX1280_BLE_EYELONG_1_0;
-  } else if (strcmp(test_payload, "eyeshort10") == 0) {
-    pkt->test_payload = SX1280_BLE_EYESHORT_1_0;
-  } else if (strcmp(test_payload, "prbs15") == 0) {
-    pkt->test_payload = SX1280_BLE_PRBS_15;
-  } else if (strcmp(test_payload, "all1") == 0) {
-    pkt->test_payload = SX1280_BLE_ALL_1;
-  } else if (strcmp(test_payload, "all0") == 0) {
-    pkt->test_payload = SX1280_BLE_ALL_0;
-  } else if (strcmp(test_payload, "eyelong01") == 0) {
-    pkt->test_payload = SX1280_BLE_EYELONG_0_1;
-  } else if (strcmp(test_payload, "eyeshort01") == 0) {
-    pkt->test_payload = SX1280_BLE_EYESHORT_0_1;
-  } else {
-    dev_err(dev, "Invalid value for ble.test-payload.\n");
-    return -EINVAL;
-  }
-
-  /* Whitening */
-  pkt->whitening = disable_whitening
-    ? SX1280_WHITENING_DISABLE
-    : SX1280_WHITENING_ENABLE;
-
-  /* Access address */
-  ble->access_address = access_address;
-
-  /* CRC seed */
-  ble->crc_seed = crc_seed;
-
-  return 0;
-}
-
-static int sx1280_parse_dt_flrc(
-  struct device *dev,
-  struct sx1280_platform_data *pdata
-) {
-  dev_dbg(dev, "sx1280_parse_dt_flrc");
+static int sx1280_parse_dt_flrc(struct sx1280_priv *priv) {
+  /* Convenience definitions for conciseness. */
+  struct sx1280_platform_data *pdata = &priv->pdata;
+  struct sx1280_flrc_params *flrc = &pdata->flrc;
+  struct sx1280_flrc_modulation_params *mod = &flrc->modulation;
+  struct sx1280_flrc_packet_params *pkt = &flrc->packet;
+  struct device *dev = &priv->spi->dev;
 
   u32 bitrate_kbs = 1300;
   const char *coding_rate = "3/4";
@@ -1067,8 +1263,6 @@ static int sx1280_parse_dt_flrc(
   u32 preamble_bits = 8;
   u32 sync_word_bits = 32;
   u32 sync_word_match[3] = { 0, 0, 0 };
-  bool fixed_length = false;
-  u32 max_payload_bytes = 127;
   u32 crc_bytes = 2;
   u32 crc_seed = 0;
   bool disable_whitening = false;
@@ -1083,8 +1277,6 @@ static int sx1280_parse_dt_flrc(
     of_property_read_u32(child, "preamble-bits", &preamble_bits);
     of_property_read_u32(child, "sync-word-bytes", &sync_word_bits);
     of_property_read_u32_array(child, "sync-word-match", sync_word_match, 3);
-    fixed_length = of_property_read_bool(child, "fixed-length");
-    of_property_read_u32(child, "max-payload-bytes", &max_payload_bytes);
     of_property_read_u32(child, "crc-bytes", &crc_bytes);
     of_property_read_u32(child, "crc-seed", &crc_seed);
     disable_whitening = of_property_read_bool(child, "disable-whitening");
@@ -1092,11 +1284,6 @@ static int sx1280_parse_dt_flrc(
 
     of_node_put(child);
   }
-
-  /* Convenience variables for simple member accesses. */
-  struct sx1280_flrc_params *flrc = &pdata->flrc;
-  struct sx1280_flrc_modulation_params *mod = &flrc->modulation;
-  struct sx1280_flrc_packet_params *pkt = &flrc->packet;
 
   switch (bitrate_kbs) {
   case 1300:
@@ -1156,7 +1343,7 @@ static int sx1280_parse_dt_flrc(
     return -EINVAL;
   }
 
-  pkt->agc_preamble_length = (enum sx1280_preamble_length) (preamble_bits << 2);
+  pkt->agc_preamble_length = preamble_bits << 2;
 
   /* Sync word length (bits) */
   switch (sync_word_bits) {
@@ -1183,18 +1370,12 @@ static int sx1280_parse_dt_flrc(
     pkt->sync_word_match |= sync_word_match[i] << i;
   }
 
-  /* Header type */
-  pkt->header_type = fixed_length
-    ? SX1280_RADIO_PACKET_FIXED_LENGTH
-    : SX1280_RADIO_PACKET_VARIABLE_LENGTH;
-
-  /* Payload length */
-  if (max_payload_bytes < 6 || max_payload_bytes > 127) {
-    dev_err(dev, "Invalid value for flrc.max-payload-bytes.\n");
-    return -EINVAL;
-  }
-
-  pkt->payload_length = max_payload_bytes;
+  /*
+   * Header type is necessarily configured as variable length because fixed
+   * length is incompatible with general-purpose packet transmission using the
+   * Linux networking stack, which may pass packets of any size.
+   */
+  pkt->header_type = SX1280_RADIO_PACKET_VARIABLE_LENGTH;
 
   /* CRC bytes */
   switch (crc_bytes) {
@@ -1226,27 +1407,35 @@ static int sx1280_parse_dt_flrc(
   return 0;
 }
 
-static int sx1280_parse_dt_gfsk(
-  struct device *dev,
-  struct sx1280_platform_data *pdata
-) {
-  dev_dbg(dev, "sx1280_parse_dt_gfsk");
+#define SX1280_DEFAULT_GFSK_BITRATE_KBS 2000
+#define SX1280_DEFAULT_GFSK_BANDWIDTH_KHZ 2400
+#define SX1280_DEFAULT_GFSK_MOD_IND 50
+#define SX1280_DEFAULT_GFSK_BT "0.5"
+#define SX1280_DEFAULT_GFSK_CRC_SEED 0xFF
+#define SX1280_DEFAULT_GFSK_CRC_POLYNOMIAL 0x1021
+
+static int sx1280_parse_dt_gfsk(struct sx1280_priv *priv) {
+  /* Convenience definitions for conciseness. */
+  struct sx1280_platform_data *pdata = &priv->pdata;
+  struct sx1280_gfsk_params *gfsk = &pdata->gfsk;
+  struct sx1280_gfsk_modulation_params *mod = &gfsk->modulation;
+  struct sx1280_gfsk_packet_params *pkt = &gfsk->packet;
+  struct device *dev = &priv->spi->dev;
 
   /* Populate defaults for GFSK mode. */
   u16 bitrate_kbs = 2000;
   u16 bandwidth_khz = 2400;
-  u32 mod_index = 200;
-  const char *bt = "1.0";
-  u32 preamble_bits = 8;
-  u32 sync_word_bytes = 2;
-  u32 sync_word_match[3] = { 0, 0, 0 };
+  u32 mod_index = 50;
+  const char *bt = "0.5";
+  u32 preamble_bits = 32;
+  u32 sync_word_bytes = 5;
+  u32 sync_word_match[3] = { 1, 0, 0 };
   bool fixed_length = false;
-  u8 max_payload_bytes = 255;
   u32 crc_bytes = 2;
-  bool disable_whitening = false;
+  bool disable_whitening = true; /* TODO: default to false */
   u32 sync_words[3] = { 0, 0, 0 };
-  u32 crc_seed = 0;
-  u32 crc_polynomial = 0;
+  u16 crc_seed = SX1280_DEFAULT_GFSK_CRC_SEED;
+  u16 crc_polynomial = SX1280_DEFAULT_GFSK_CRC_POLYNOMIAL;
 
   struct device_node *child = of_get_child_by_name(dev->of_node, "gfsk");
 
@@ -1260,37 +1449,32 @@ static int sx1280_parse_dt_gfsk(
     of_property_read_u32(child, "sync-word-bytes", &sync_word_bytes);
     of_property_read_u32_array(child, "sync-word-match", sync_word_match, 3);
     fixed_length = of_property_read_bool(child, "fixed-length");
-    of_property_read_u8(child, "max-payload-bytes", &max_payload_bytes);
     of_property_read_u32(child, "crc-bytes", &crc_bytes);
-    disable_whitening = of_property_read_bool(child, "disable-whitening");
+    // disable_whitening = of_property_read_bool(child, "disable-whitening");
     of_property_read_variable_u32_array(child, "sync-words", sync_words, 0, 3);
-    of_property_read_u32(child, "crc-seed", &crc_seed);
-    of_property_read_u32(child, "crc-polynomial", &crc_polynomial);
+    of_property_read_u16(child, "crc-seed", &crc_seed);
+    of_property_read_u16(child, "crc-polynomial", &crc_polynomial);
 
     of_node_put(child);
   }
-
-  struct sx1280_gfsk_params *gfsk = &pdata->gfsk;
-  struct sx1280_gfsk_modulation_params *mod = &gfsk->modulation;
-  struct sx1280_gfsk_packet_params *pkt = &gfsk->packet;
 
   /* Bitrate-bandwidth */
   u32 brbw = CONCAT32(bitrate_kbs, bandwidth_khz);
 
   switch (brbw) {
-    MATCH2(2000, 2400, SX1280_GFSK_BLE_BR_2_000_BW_2_4)
-    MATCH2(1600, 2400, SX1280_GFSK_BLE_BR_1_600_BW_2_4)
-    MATCH2(1000, 2400, SX1280_GFSK_BLE_BR_1_000_BW_2_4)
-    MATCH2(1000, 1200, SX1280_GFSK_BLE_BR_1_000_BW_1_2)
-    MATCH2(800, 2400, SX1280_GFSK_BLE_BR_0_800_BW_2_4)
-    MATCH2(800, 1200, SX1280_GFSK_BLE_BR_0_800_BW_1_2)
-    MATCH2(500, 1200, SX1280_GFSK_BLE_BR_0_500_BW_1_2)
-    MATCH2(500, 600, SX1280_GFSK_BLE_BR_0_500_BW_0_6)
-    MATCH2(400, 1200, SX1280_GFSK_BLE_BR_0_400_BW_1_2)
-    MATCH2(400, 600, SX1280_GFSK_BLE_BR_0_400_BW_0_6)
-    MATCH2(250, 600, SX1280_GFSK_BLE_BR_0_250_BW_0_6)
-    MATCH2(250, 300, SX1280_GFSK_BLE_BR_0_250_BW_0_3)
-    MATCH2(125, 300, SX1280_GFSK_BLE_BR_0_125_BW_0_3)
+    MATCH2(2000, 2400, SX1280_GFSK_BR_2_000_BW_2_4)
+    MATCH2(1600, 2400, SX1280_GFSK_BR_1_600_BW_2_4)
+    MATCH2(1000, 2400, SX1280_GFSK_BR_1_000_BW_2_4)
+    MATCH2(1000, 1200, SX1280_GFSK_BR_1_000_BW_1_2)
+    MATCH2(800, 2400, SX1280_GFSK_BR_0_800_BW_2_4)
+    MATCH2(800, 1200, SX1280_GFSK_BR_0_800_BW_1_2)
+    MATCH2(500, 1200, SX1280_GFSK_BR_0_500_BW_1_2)
+    MATCH2(500, 600, SX1280_GFSK_BR_0_500_BW_0_6)
+    MATCH2(400, 1200, SX1280_GFSK_BR_0_400_BW_1_2)
+    MATCH2(400, 600, SX1280_GFSK_BR_0_400_BW_0_6)
+    MATCH2(250, 600, SX1280_GFSK_BR_0_250_BW_0_6)
+    MATCH2(250, 300, SX1280_GFSK_BR_0_250_BW_0_3)
+    MATCH2(125, 300, SX1280_GFSK_BR_0_125_BW_0_3)
   default:
     dev_err(
       dev,
@@ -1308,8 +1492,7 @@ static int sx1280_parse_dt_gfsk(
     return -EINVAL;
   }
 
-  mod->modulation_index =
-    (enum sx1280_gfsk_modulation_index) (mod_index / 25 - 1);
+  mod->modulation_index = mod_index / 25 - 1;
 
   /* Bandwidth-time */
   if (strcmp(bt, "off") == 0) {
@@ -1333,7 +1516,7 @@ static int sx1280_parse_dt_gfsk(
     return -EINVAL;
   }
 
-  pkt->preamble_length = (enum sx1280_preamble_length) (preamble_bits << 2);
+  pkt->preamble_length = (preamble_bits << 2) - 0x10;
 
   /* Sync word length */
   if (sync_word_bytes < 1 || sync_word_bytes > 5) {
@@ -1352,19 +1535,14 @@ static int sx1280_parse_dt_gfsk(
       return -EINVAL;
     }
 
-    pkt->sync_word_match |= sync_word_match[i] << i;
+    pkt->sync_word_match |= sync_word_match[i] << (i + 4);
   }
 
   /* Header type */
-  pkt->header_type = fixed_length
-    ? SX1280_RADIO_PACKET_FIXED_LENGTH
-    : SX1280_RADIO_PACKET_VARIABLE_LENGTH;
-
-  /* Payload length */
-  pkt->payload_length = max_payload_bytes;
+  pkt->header_type = SX1280_RADIO_PACKET_VARIABLE_LENGTH;
 
   /* CRC bytes */
-  pkt->crc_length = (enum sx1280_gfsk_crc_length) (crc_bytes << 4);
+  pkt->crc_length = crc_bytes << 4;
 
   /* Whitening */
   pkt->whitening = disable_whitening
@@ -1378,11 +1556,12 @@ static int sx1280_parse_dt_gfsk(
   return 0;
 }
 
-static int sx1280_parse_dt_lora(
-  struct device *dev,
-  struct sx1280_platform_data *pdata
-) {
-  dev_dbg(dev, "sx1280_parse_dt_lora");
+static int sx1280_parse_dt_lora(struct sx1280_priv *priv) {
+  /* Convenience definitions for conciseness. */
+  struct sx1280_platform_data *pdata = &priv->pdata;
+  struct sx1280_lora_modulation_params *mod = &pdata->lora.modulation;
+  struct sx1280_lora_packet_params *pkt = &pdata->lora.packet;
+  struct device *dev = &priv->spi->dev;
 
   u32 spreading_factor = 12;
   u32 bandwidth_khz = 1600;
@@ -1390,7 +1569,6 @@ static int sx1280_parse_dt_lora(
   bool disable_li;
   u32 preamble_bits = 8;
   bool implicit_header;
-  u8 max_payload_bytes = 255;
   bool disable_crc;
   bool invert_iq;
 
@@ -1403,22 +1581,18 @@ static int sx1280_parse_dt_lora(
     disable_li = of_property_read_bool(child, "disable-long-interleaving");
     of_property_read_u32(child, "preamble-bits", &preamble_bits);
     implicit_header = of_property_read_bool(child, "implicit-header");
-    of_property_read_u8(child, "max-payload-bytes", &max_payload_bytes);
     disable_crc = of_property_read_bool(child, "disable-crc");
     invert_iq = of_property_read_bool(child, "invert-iq");
 
     of_node_put(child);
   }
 
-  struct sx1280_lora_modulation_params *mod = &pdata->lora.modulation;
-  struct sx1280_lora_packet_params *pkt = &pdata->lora.packet;
-
   if (spreading_factor < 5 || spreading_factor > 12) {
     dev_err(dev, "Property lora.spreading-factor out of range.\n");
     return -EINVAL;
   }
 
-  mod->spreading = (enum sx1280_lora_spreading) (spreading_factor << 4);
+  mod->spreading = spreading_factor << 4;
 
   switch (bandwidth_khz) {
   case 1600:
@@ -1451,7 +1625,7 @@ static int sx1280_parse_dt_lora(
   }
 
   if (disable_li) {
-    mod->coding_rate = (enum sx1280_lora_coding_rate) (coding_rate[2] - '4');
+    mod->coding_rate = coding_rate[2] - '4';
   } else {
     switch (coding_rate[2]) {
     case '5':
@@ -1513,17 +1687,6 @@ static int sx1280_parse_dt_lora(
     ? SX1280_IMPLICIT_HEADER
     : SX1280_EXPLICIT_HEADER;
 
-  /* Payload length. */
-  if (
-    max_payload_bytes == 0
-    || (mod->coding_rate == SX1280_LORA_CR_LI_4_8 && max_payload_bytes > 253)
-  ) {
-    dev_err(dev, "Invalid value for lora.max-payload-bytes.\n");
-    return -EINVAL;
-  }
-
-  pkt->payload_length = max_payload_bytes;
-
   /* CRC enabling. */
   pkt->crc = disable_crc
     ? SX1280_LORA_CRC_DISABLE
@@ -1537,31 +1700,23 @@ static int sx1280_parse_dt_lora(
   return 0;
 }
 
-static int sx1280_parse_dt_ranging(
-  struct device *dev,
-  struct sx1280_platform_data *pdata
-) {
-  dev_dbg(dev, "sx1280_parse_dt_ranging");
-
+static int sx1280_parse_dt_ranging(struct sx1280_priv *priv) {
   return 0;
 }
 
-static int sx1280_parse_dt(
-  struct device *dev,
-  struct sx1280_platform_data *pdata
-) {
-  dev_dbg(dev, "sx1280_parse_dt");
-
-  struct device_node *node = dev->of_node;
+static int sx1280_parse_dt(struct sx1280_priv *priv) {
   int err;
+  struct sx1280_platform_data *pdata = &priv->pdata;
+  struct device *dev = &priv->spi->dev;
+  struct device_node *node = dev->of_node;
 
   /* Default values for top-level device tree properties. */
   const char *mode = "gfsk";
-  s32 power_dbm = 13;
-  u32 ramp_time_us = 2;
+  s32 power_dbm = 0;
+  u32 ramp_time_us = 20;
   u32 rf_freq_hz = 2400000000;
   u32 startup_timeout_us = 10000;
-  u32 tx_timeout_us = 1000;
+  u32 tx_timeout_us = 1000000;
 
   /* Overwrite the default values if they are specified. */
   of_property_read_string(node, "mode", &mode);
@@ -1570,9 +1725,7 @@ static int sx1280_parse_dt(
   of_property_read_u32(node, "startup-timeout-us", &startup_timeout_us);
   of_property_read_u32(node, "tx-timeout-us", &tx_timeout_us);
 
-  if (strcmp(mode, "ble") == 0) {
-    pdata->mode = SX1280_MODE_BLE;
-  } else if (strcmp(mode, "flrc") == 0) {
+  if (strcmp(mode, "flrc") == 0) {
     pdata->mode = SX1280_MODE_FLRC;
   } else if (strcmp(mode, "gfsk") == 0) {
     pdata->mode = SX1280_MODE_GFSK;
@@ -1624,8 +1777,8 @@ static int sx1280_parse_dt(
    * Convert the timeout and period base into nanoseconds so that an integer
    * division can be performed for maximum precision within constraints.
    */
-  u32 timeout_ns = tx_timeout_us * 1000;
-  u32 period_base_ns;
+  u64 timeout_ns = (u64) tx_timeout_us * 1000;
+  u64 period_base_ns;
 
   if (tx_timeout_us < 1024000) {
     pdata->period_base = SX1280_PERIOD_BASE_15_625_US;
@@ -1652,7 +1805,7 @@ static int sx1280_parse_dt(
    * etc. When a timeout is specified, it's crucial that the driver guarantees
    * that _at least_ that amount of time has passed before timing out.
    */
-  pdata->period_base_count = (timeout_ns / period_base_ns)
+  pdata->period_base_count = (u16) (timeout_ns / period_base_ns)
     + (timeout_ns % period_base_ns != 0);
 
   /*
@@ -1660,11 +1813,10 @@ static int sx1280_parse_dt(
    * configuring each of the different packet modes of the SX1280.
    */
   if (
-    (err = sx1280_parse_dt_ble(dev, pdata))
-    || (err = sx1280_parse_dt_flrc(dev, pdata))
-    || (err = sx1280_parse_dt_gfsk(dev, pdata))
-    || (err = sx1280_parse_dt_lora(dev, pdata))
-    || (err = sx1280_parse_dt_ranging(dev, pdata))
+    (err = sx1280_parse_dt_flrc(priv))
+    || (err = sx1280_parse_dt_gfsk(priv))
+    || (err = sx1280_parse_dt_lora(priv))
+    || (err = sx1280_parse_dt_ranging(priv))
   ) {
     return err;
   }
@@ -1677,14 +1829,11 @@ static int sx1280_parse_dt(
  * @param priv - The internal SX1280 driver structure.
  * @param dt - Whether a device tree configuration or platform data is used.
  */
-static int sx1280_parse_gpios(
-  struct device *dev,
-  struct sx1280_priv *priv,
-  bool dt
-) {
-  dev_dbg(dev, "sx1280_parse_gpios");
-
+static int sx1280_parse_gpios(struct sx1280_priv *priv, bool dt) {
   int err;
+  struct device *dev = &priv->spi->dev;
+
+  dev_dbg(dev, "sx1280_parse_gpios");
 
   /*
    * 1. Configure the busy pin GPIO.
@@ -1818,24 +1967,28 @@ static int sx1280_reset(struct sx1280_priv *priv) {
   usleep_range(100, 150);
   gpiod_set_value_cansleep(priv->reset, 0);
 
+#ifdef DEBUG
   ktime_t start = ktime_get();
+#endif
 
   /* Wait for BUSY = 0. */
-  err = sx1280_wait_on_gpio(priv->busy, 0, priv->pdata.startup_timeout_us);
-  if (err) {
+  if ((err = sx1280_wait_busy(priv))) {
     netdev_err(priv->netdev, "failed to reset, timeout exceeded\n");
     return err;
   }
 
+#ifdef DEBUG
   ktime_t end = ktime_get();
   s64 reset_time = ktime_to_us(ktime_sub(end, start));
-
   netdev_dbg(priv->netdev, "reset completed in %lld us\n", reset_time);
+#endif
+
   return 0;
 }
 
 /**
  * Performs the chip setup.
+ * @context - process & pre-lock
  * @param priv - The internal SX1280 driver structure.
  * @param mode - The mode in which to put the SX1280.
  */
@@ -1846,15 +1999,12 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
 
   dev_dbg(&spi->dev, "starting setup\n");
 
-  /* Reset the chip. */
-  if ((err = sx1280_reset(priv))) {
-    return err;
-  }
-
-  /* Check the status. */
+  /* Reset the chip and check its status after reset. */
   u8 status;
-  if ((err = sx1280_get_status(spi, &status))) {
-    dev_err(&spi->dev, "failed to get status\n");
+  if (
+    (err = sx1280_reset(priv))
+    || (err = sx1280_get_status(priv, &status))
+  ) {
     return err;
   }
 
@@ -1875,31 +2025,6 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
     return -EIO;
   }
 
-  /* Set the packet type. */
-  if ((err = sx1280_set_packet_type(spi, mode)) < 0) {
-    dev_err(&spi->dev, "failed to set packet type\n");
-    return err;
-  }
-
-  /* Set the RF frequency. */
-  if ((err = sx1280_set_rf_frequency(spi, pdata->rf_freq)) < 0) {
-    dev_err(&spi->dev, "failed to set RF frequency\n");
-    return err;
-  }
-
-  /*
-   * Set the Tx and Rx buffer base addresses to 0x0.
-   * This allows the chip to use the full 256-byte data buffer.
-   * The size of the data buffer also restricts the MTU to 256 bytes.
-   *
-   * Since the chip supports half-duplex, the data must be sent/read before
-   * performing another operation, but otherwise will not be overwritten.
-   */
-  if ((err = sx1280_set_buffer_base_address(spi, 0x0, 0x0)) < 0) {
-    dev_err(&spi->dev, "failed to set buffer base address\n");
-    return err;
-  }
-
   /*
    * Extract the modulation and packet params from the platform data, depending
    * on the mode that the chip is being commanded into.
@@ -1908,10 +2033,6 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
   union sx1280_packet_params pkt_params;
 
   switch (mode) {
-  case SX1280_MODE_BLE:
-    mod_params.gfsk = pdata->ble.modulation;
-    pkt_params.ble = pdata->ble.packet;
-    break;
   case SX1280_MODE_FLRC:
     mod_params.flrc = pdata->flrc.modulation;
     pkt_params.flrc = pdata->flrc.packet;
@@ -1930,32 +2051,42 @@ static int sx1280_setup(struct sx1280_priv *priv, enum sx1280_mode mode) {
     break;
   }
 
-  /*
-   * Set modulation and packet parameters.
-   * These may be changed later by ioctl calls.
-   */
-  if ((err = sx1280_set_modulation_params(spi, mod_params)) < 0) {
-    dev_err(&spi->dev, "failed to set modulation parameters\n");
-    return err;
-  }
+  /* TODO: Allow customization */
+  u8 sync_word[5] = { 0xD3, 0x91, 0xD3, 0x91, 0xD3 };
+  u16 sync_word_addr = SX1280_REG_SYNC_ADDRESS_1_BYTE_4;
 
-  if ((err = sx1280_set_packet_params(spi, pkt_params)) < 0) {
-    dev_err(&spi->dev, "failed to set packet parameters\n");
-    return err;
-  }
+  u8 crc_poly[2] = {
+    priv->pdata.gfsk.crc_polynomial >> 8,
+    priv->pdata.gfsk.crc_polynomial & 0xFF
+  };
+  u16 crc_poly_addr = SX1280_REG_CRC_POLYNOMIAL_DEFINITION_MSB;
 
-  /*
-   * Write the sync words.
-   * TODO: Allow customization.
-   */
-  u8 sync_word[5] = { 0 };
-  sx1280_write_register(spi, SX1280_REG_SYNC_ADDRESS_1_BYTE_4, sync_word, 5);
+  u8 crc_seed[2] = {
+    priv->pdata.gfsk.crc_seed >> 8,
+    priv->pdata.gfsk.crc_seed & 0xFF
+  };
+  u16 crc_seed_addr = SX1280_REG_CRC_MSB_INITIAL_VALUE;
 
-  /*
-   * Set TX and RX settings.
-   */
-  if ((err = sx1280_set_tx_params(spi, pdata->power, pdata->ramp_time)) < 0) {
-    dev_err(&spi->dev, "failed to set TX parameters\n");
+  if (
+    (err = sx1280_set_packet_type(priv, mode))
+    || (err = sx1280_set_rf_frequency(priv, pdata->rf_freq))
+
+    /*
+     * Set the Tx and Rx buffer base addresses to 0x0.
+     * This allows the chip to use the full 256-byte data buffer.
+     * The size of the data buffer also restricts the MTU to 256 bytes.
+     *
+     * Since the chip supports half-duplex, the data must be sent/read before
+     * performing another operation, but otherwise will not be overwritten.
+     */
+    || (err = sx1280_set_buffer_base_address(priv, 0x0, 0x0))
+    || (err = sx1280_set_modulation_params(priv, mod_params))
+    || (err = sx1280_write_register(priv, sync_word_addr, sync_word, 5))
+    || (err = sx1280_write_register(priv, crc_poly_addr, crc_poly, 2))
+    || (err = sx1280_write_register(priv, crc_seed_addr, crc_seed, 2))
+    || (err = sx1280_set_tx_params(priv, pdata->power, pdata->ramp_time))
+    // || (err = sx1280_set_auto_fs(priv, true))
+  ) {
     return err;
   }
 
@@ -1979,6 +2110,7 @@ static int sx1280_probe(struct spi_device *spi) {
   /* Allocate a new net device (without registering, yet). */
   struct net_device *netdev = alloc_etherdev(sizeof(struct sx1280_priv));
   if (!netdev) {
+    dev_err(&spi->dev, "failed to alloc etherdev\n");
     return -ENOMEM;
   }
 
@@ -1990,6 +2122,7 @@ static int sx1280_probe(struct spi_device *spi) {
 
   /* Create and register the priv structure. */
   struct sx1280_priv *priv = netdev_priv(netdev);
+  priv->initialized = false;
   priv->mode = SX1280_MODE_GFSK; /* default mode after reset */
   priv->netdev = netdev;
   priv->spi = spi;
@@ -2003,34 +2136,31 @@ static int sx1280_probe(struct spi_device *spi) {
   if (legacy_platform) {
     priv->pdata = *legacy_platform;
   } else {
-    if ((err = sx1280_parse_dt(&spi->dev, &priv->pdata))) {
+    if ((err = sx1280_parse_dt(priv))) {
       dev_err(&spi->dev, "failed to parse device tree\n");
-      goto err_platform;
+      goto error_free;
     }
   }
 
   /*
    * Parse GPIOs according to whether a device tree or platform data is used.
    */
-  if ((err = sx1280_parse_gpios(&spi->dev, priv, !legacy_platform))) {
+  if ((err = sx1280_parse_gpios(priv, !legacy_platform))) {
     dev_err(&spi->dev, "failed to configure GPIOs\n");
-    goto err_gpio;
+    goto error_free;
   }
 
   /* Set netdev settings according to device tree. */
   /* TODO: Allow packet size and mode to be changed from userspace. */
   switch (priv->pdata.mode) {
-  case SX1280_MODE_BLE:
-    netdev->mtu = priv->pdata.ble.packet.payload_length;
-    break;
   case SX1280_MODE_FLRC:
-    netdev->mtu = priv->pdata.flrc.packet.payload_length;
+    netdev->mtu = SX1280_FLRC_PAYLOAD_LENGTH_MAX;
     break;
   case SX1280_MODE_GFSK:
-    netdev->mtu = priv->pdata.gfsk.packet.payload_length;
+    netdev->mtu = SX1280_GFSK_PAYLOAD_LENGTH_MAX;
     break;
   case SX1280_MODE_LORA:
-    netdev->mtu = priv->pdata.lora.packet.payload_length;
+    netdev->mtu = SX1280_LORA_PAYLOAD_LENGTH_MAX;
     break;
   case SX1280_MODE_RANGING:
     /* Packet transmission is not permitted in ranging mode. */
@@ -2047,21 +2177,19 @@ static int sx1280_probe(struct spi_device *spi) {
   /* Apply the SPI settings above and handle errors. */
   if ((err = spi_setup(spi))) {
     dev_err(&spi->dev, "failed to apply SPI settings\n");
-    goto err_spi;
+    goto error_free;
   }
 
   if ((err = sx1280_setup(priv, priv->pdata.mode))) {
     dev_err(&spi->dev, "failed to set up the SX1280.\n");
-    goto err_setup;
+    goto error_free;
   }
 
   /* Map all IRQs to the in-use DIO. */
   u16 irq_mask[3] = { 0 };
   irq_mask[priv->dio_index - 1] = 0xFFFF;
-  err = sx1280_set_dio_irq_params(spi, 0xFFFF, irq_mask);
-  if (err) {
-    dev_err(&spi->dev, "failed to set DIO IRQ parameters\n");
-    goto err_setup;
+  if ((err = sx1280_set_dio_irq_params(priv, 0xFFFF, irq_mask))) {
+    goto error_free;
   }
 
   netdev_dbg(netdev, "configured DIO%d as IRQ", priv->dio_index);
@@ -2075,13 +2203,15 @@ static int sx1280_probe(struct spi_device *spi) {
   );
 
   INIT_WORK(&priv->tx_work, sx1280_tx_work);
+  mutex_lock(&priv->lock);
 
   /*
    * Register the new net device.
-   * The first one will appear as interface lora0.
+   * The first one will appear as interface radio0.
    */
   if ((err = register_netdev(netdev))) {
-    goto err_register;
+    dev_err(&spi->dev, "failed to register net device\n");
+    goto error_wq;
   }
 
   dev_info(
@@ -2090,46 +2220,53 @@ static int sx1280_probe(struct spi_device *spi) {
     netdev->name
   );
 
-  mutex_lock(&priv->lock);
-
   /*
    * Set into continuous RX mode. Constantly look for packets and only switch to
    * TX when a packet is queued by userspace.
    */
-  if ((err = sx1280_set_rx(spi, 0x1, 0xFFFF)) < 0) {
-    dev_info(&spi->dev, "failed to set into RX mode\n");
-    goto err_rx;
+  if ((err = sx1280_listen(priv))) {
+    goto error_wq;
   }
 
+  /*
+   * Mark the SX1280 as fully initialized.
+   * This activates the IRQ handler.
+   */
+  priv->initialized = true;
   mutex_unlock(&priv->lock);
 
-  dev_info(&spi->dev, "%s is listening for packets\n", netdev->name);
+#ifdef DEBUG
+  INIT_DELAYED_WORK(&priv->status_check, sx1280_check_status);
+  // schedule_delayed_work(&priv->status_check, 10 * HZ);
+#endif
 
+  dev_dbg(&spi->dev, "%s is listening for packets\n", netdev->name);
   return 0;
 
-err_rx:
-err_register:
+error_wq:
+  mutex_unlock(&priv->lock);
   destroy_workqueue(priv->xmit_queue);
-err_spi:
-err_busy:
-err_setup:
-err_gpio:
-err_platform:
+error_free:
   free_netdev(netdev);
   return err;
 }
 
 static void sx1280_remove(struct spi_device *spi) {
-  dev_dbg(&spi->dev, "sx1280_remove");
-
   struct sx1280_priv *priv = spi_get_drvdata(spi);
 
   /* TODO: Potentially need to free GPIOs for platform data instances. */
+
+  mutex_lock(&priv->lock);
+
+#ifdef DEBUG
+  cancel_delayed_work_sync(&priv->status_check);
+#endif
 
   cancel_work_sync(&priv->tx_work);
   destroy_workqueue(priv->xmit_queue);
   unregister_netdev(priv->netdev);
   free_netdev(priv->netdev);
+  mutex_unlock(&priv->lock);
 }
 
 static const struct of_device_id sx1280_of_match[] = {
