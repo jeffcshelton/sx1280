@@ -111,69 +111,37 @@
             '';
           };
 
-          busyGPIO = mkOption {
-            # TODO
+          frequencyMHz = mkOption {
+            type = types.ints.between 2400 2500;
+            default = 2400;
           };
 
-          frequency = mkOption {
-            type = types.ints.u32;
-            default = 2400000000;
-          };
-
-          startupTimeout = mkOption {
-            type = types.ints.between 0 1000000;
-            default = 2000;
-          };
-
-          txTimeout = mkOption {
-            type = types.ints.between 0 262143999;
-            default = 1000;
-          };
-
-          power = mkOption {
+          txPower = mkOption {
             type = types.ints.between (-18) 13;
             default = 13;
           };
 
-          rampTime = mkOption {
+          rampTimeUs = mkOption {
             type = types.enum [ 2 4 6 8 10 12 16 20 ];
             default = 2;
+            example = 20;
           };
 
-          ble = {
-            maxPayloadBytes = mkOption {
-              type = types.enum [ 31 37 63 255 ];
-            };
+          syncWords = mkOption {
+            type = types.addCheck
+              (types.listOf
+                (types.addCheck
+                  types.str
+                  (hex:
+                    let i = lib.trivial.fromHexString hex;
+                    in i >= 0 && i <= lib.trivial.fromHexString "FFFFFFFFFF"
+                  )
+                )
+              )
+              (arr: builtins.length arr <= 3);
 
-            crcBytes = mkOption {
-              type = types.enum [ 0 3 ];
-            };
-
-            testPayload = mkOption {
-              type = types.enum [
-                "prbs9"
-                "eyelong10"
-                "eyeshort10"
-                "prbs15"
-                "all1"
-                "all0"
-                "eyelong01"
-                "eyeshort01"
-              ];
-            };
-
-            disableWhitening = mkOption {
-              type = types.bool;
-              default = false;
-            };
-
-            accessAddress = mkOption {
-              type = types.int;
-            };
-
-            crcSeed = mkOption {
-              type = types.ints.u16;
-            };
+            default = [ ];
+            example = [ "12AD34CD56" "D391D391D3" "AAF0053C81" ];
           };
 
           flrc = {
@@ -195,10 +163,6 @@
             preambleBits = mkOption {
               type = types.enum [ 8 12 16 20 24 28 32 ];
               default = 8;
-            };
-
-            syncWordMatch = mkOption {
-              # TODO : come back
             };
 
             fixedLength = mkOption {
@@ -225,49 +189,45 @@
               type = types.bool;
               default = false;
             };
-
-            syncWords = mkOption {
-              # TODO : come back
-            };
           };
 
           # TODO: come back and try to capture the more complicated valid pairs
           # between fields
           gfsk = {
-            bitrateKbs = mkOption {
-              type = types.enum [ 2000 1600 1000 800 500 400 250 125 ];
-              default = 2000;
-            };
-
             bandwidthKHz = mkOption {
               type = types.enum [ 2400 1200 600 300 ];
               default = 2400;
             };
 
-            modulationIndex = mkOption {
-              type = types.enum [
-                35
-                50
-                75
-                100
-                125
-                150
-                175
-                200
-                225
-                250
-                275
-                300
-                325
-                350
-                375
-                400
-              ];
-
-              default = 200;
+            bitrateKbs = mkOption {
+              type = types.enum [ 2000 1600 1000 800 500 400 250 125 ];
+              default = 2000;
             };
 
-            bt = mkOption {
+            modulationIndex = mkOption {
+              type = types.enum [
+                "0.35"
+                "0.50"
+                "0.75"
+                "1.00"
+                "1.25"
+                "1.50"
+                "1.75"
+                "2.00"
+                "2.25"
+                "2.50"
+                "2.75"
+                "3.00"
+                "3.25"
+                "3.50"
+                "3.75"
+                "4.00"
+              ];
+
+              default = "2.00";
+            };
+
+            bandwidthTime = mkOption {
               type = types.enum [ "off" "1.0" "0.5" ];
               default = "1.0";
             };
@@ -282,32 +242,14 @@
               default = 2;
             };
 
-            syncWordMatch = mkOption {
-              # TODO : come back
-            };
-
-            fixedLength = mkOption {
-              type = types.bool;
-              default = false;
-            };
-
-            maxPayloadBytes = mkOption {
-              type = types.ints.between 1 255;
-              default = 255;
-            };
-
             crcBytes = mkOption {
               type = types.ints.between 0 2;
               default = 2;
             };
 
-            disableWhitening = mkOption {
+            whitening = mkOption {
               type = types.bool;
-              default = false;
-            };
-
-            syncWords = mkOption {
-              # TODO
+              default = true;
             };
 
             crcSeed = mkOption {
@@ -318,6 +260,15 @@
             crcPolynomial = {
               type = types.ints.u16;
               default = 0;
+            };
+
+            syncWordMatch = mkOption {
+              type = types.addCheck
+                (types.listOf types.bool)
+                (x: builtins.length x == 3);
+
+              default = [ true false false ];
+              example = [ true true true ];
             };
           };
 
@@ -373,20 +324,71 @@
         };
 
         config = lib.mkIf cfg.enable {
+          assertions = [
+            {
+              assertion =
+                let
+                  valid = [
+                    { bitrateKbs = 2000; bandwidthKHz = 2400; }
+                    { bitrateKbs = 1600; bandwidthKHz = 2400; }
+                    { bitrateKbs = 1000; bandwidthKHz = 2400; }
+                    { bitrateKbs = 1000; bandwidthKHz = 1200; }
+                    { bitrateKbs = 800;  bandwidthKHz = 2400; }
+                    { bitrateKbs = 800;  bandwidthKHz = 1200; }
+                    { bitrateKbs = 500;  bandwidthKHz = 1200; }
+                    { bitrateKbs = 500;  bandwidthKHz = 600;  }
+                    { bitrateKbs = 400;  bandwidthKHz = 1200; }
+                    { bitrateKbs = 400;  bandwidthKHz = 600;  }
+                    { bitrateKbs = 250;  bandwidthKHz = 600;  }
+                    { bitrateKbs = 250;  bandwidthKHz = 300;  }
+                    { bitrateKbs = 125;  bandwidthKHz = 300;  }
+                  ];
+                in
+                builtins.any (combo:
+                  combo.bandwidthKHz == config.bandwidthKHz
+                  && combo.bitrateKbs == config.bitrateKbs
+                ) valid;
+            }
+          ];
+
           boot = {
             extraModulePackages = [ kModule ];
             kernelModules = [ "sx1280" ];
           };
 
-          # hardware.deviceTree = {
-          #   enable = true;
-          #   overlays = [
-          #     {
-          #       name = "sx1280.dtbo";
-          #       dtsFile = cfg.dtso;
-          #     }
-          #   ];
-          # };
+          hardware.deviceTree = lib.mkIf (cfg.dtso != null) {
+            enable = true;
+            overlays = [
+              {
+                name = "sx1280.dtbo";
+                dtsFile = cfg.dtso;
+              }
+            ];
+          };
+
+          services.udev.extraRules = ''
+            # Configure the SX1280 via sysfs when it appears.
+            SUBSYSTEM=="net", DRIVER="sx1280", ACTION=="add", \
+              ATTR{frequency}="${cfg.frequencyMHz * 1000000}", \
+              ATTR{mode}="${cfg.mode}", \
+              ATTR{tx_power}="${cfg.txPower}", \
+              ATTR{ramp_time}="${cfg.rampTimeUs}", \
+              ATTR{gfsk/bandwidth}="${cfg.gfsk.bandwidthKHz * 1000}", \
+              ATTR{gfsk/bandwidth_time}="${cfg.gfsk.bandwidthTime}", \
+              ATTR{gfsk/bitrate}="${cfg.gfsk.bitrateKbs * 1000}", \
+              ATTR{gfsk/crc_length}="${cfg.gfsk.crcBytes}", \
+              ATTR{gfsk/crc_polynomial}="${cfg.gfsk.crcPolynomial}", \
+              ATTR{gfsk/crc_seed}="${cfg.gfsk.crcSeed}", \
+              ATTR{gfsk/modulation_index}="${cfg.gfsk.modulationIndex}", \
+              ATTR{gfsk/preamble_bits}="${cfg.gfsk.preambleBits}", \
+              ATTR{gfsk/sync_word_length}="${cfg.gfsk.syncWordBytes}", \
+              ATTR{gfsk/sync_word_match}="${
+                lib.concatMapStrings
+                  (b: if b then "1" else "0")
+                  cfg.gfsk.syncWordMatch
+              }", \
+              ATTR{gfsk/whitening}="${if cfg.gfsk.whitening then "1" else "0"}"
+          '';
         };
       };
 

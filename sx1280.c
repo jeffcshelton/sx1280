@@ -77,8 +77,19 @@ enum sx1280_mode {
   SX1280_MODE_FLRC    = 0x03,
 };
 
-static int sx1280_mode_etos() {
+static const char *sx1280_mode_etos(enum sx1280_mode mode) {
+  switch (mode) {
+  case SX1280_MODE_FLRC:
+    return "flrc";
+  case SX1280_MODE_GFSK:
+    return "gfsk";
+  case SX1280_MODE_LORA:
+    return "lora";
+  case SX1280_MODE_RANGING:
+    return "ranging";
+  }
 
+  return ERR_PTR(-EINVAL);
 }
 
 enum sx1280_ramp_time {
@@ -89,8 +100,35 @@ enum sx1280_ramp_time {
   SX1280_RADIO_RAMP_10_US = 0x80,
   SX1280_RADIO_RAMP_12_US = 0xA0,
   SX1280_RADIO_RAMP_16_US = 0xC0,
-  SX1280_RADIO_RAMP_20_US = 0xE0
+  SX1280_RADIO_RAMP_20_US = 0xE0,
 };
+
+static int sx1280_ramp_time_etoi(enum sx1280_ramp_time ramp_time) {
+  switch (ramp_time) {
+  case SX1280_RADIO_RAMP_02_US: return 2;
+  case SX1280_RADIO_RAMP_04_US: return 4;
+  case SX1280_RADIO_RAMP_06_US: return 6;
+  case SX1280_RADIO_RAMP_08_US: return 8;
+  case SX1280_RADIO_RAMP_10_US: return 10;
+  case SX1280_RADIO_RAMP_12_US: return 12;
+  case SX1280_RADIO_RAMP_16_US: return 16;
+  case SX1280_RADIO_RAMP_20_US: return 20;
+  }
+}
+
+static int sx1280_ramp_time_itoe(int us) {
+  switch (us) {
+  case 2:  return SX1280_RADIO_RAMP_02_US;
+  case 4:  return SX1280_RADIO_RAMP_04_US;
+  case 6:  return SX1280_RADIO_RAMP_06_US;
+  case 8:  return SX1280_RADIO_RAMP_08_US;
+  case 10: return SX1280_RADIO_RAMP_10_US;
+  case 12: return SX1280_RADIO_RAMP_12_US;
+  case 16: return SX1280_RADIO_RAMP_16_US;
+  case 20: return SX1280_RADIO_RAMP_20_US;
+  default: return -EINVAL;
+  }
+}
 
 enum sx1280_cad_symbol_num {
   SX1280_LORA_CAD_01_SYMBOL  = 0x00,
@@ -119,85 +157,120 @@ inline static int sx1280_preamble_itoe(int bits) {
   return (bits - 4) << 2;
 }
 
-inline static int sx1280_preamble_etoi(u8 len) {
+inline static int sx1280_preamble_etoi(enum sx1280_preamble_length len) {
   return (len >> 2) + 4;
 }
 
-#define SX1280_SYNC_WORD_LEN_1_B 0x00
-#define SX1280_SYNC_WORD_LEN_2_B 0x02
-#define SX1280_SYNC_WORD_LEN_3_B 0x04
-#define SX1280_SYNC_WORD_LEN_4_B 0x06
-#define SX1280_SYNC_WORD_LEN_5_B 0x08
+enum sx1280_gfsk_sync_word_length {
+  SX1280_SYNC_WORD_LEN_1_B = 0x00,
+  SX1280_SYNC_WORD_LEN_2_B = 0x02,
+  SX1280_SYNC_WORD_LEN_3_B = 0x04,
+  SX1280_SYNC_WORD_LEN_4_B = 0x06,
+  SX1280_SYNC_WORD_LEN_5_B = 0x08,
+};
 
-#define SX1280_RADIO_SELECT_SYNCWORD_OFF   0x00
-#define SX1280_RADIO_SELECT_SYNCWORD_1     0x10
-#define SX1280_RADIO_SELECT_SYNCWORD_2     0x20
-#define SX1280_RADIO_SELECT_SYNCWORD_1_2   0x30
-#define SX1280_RADIO_SELECT_SYNCWORD_3     0x40
-#define SX1280_RADIO_SELECT_SYNCWORD_1_3   0x50
-#define SX1280_RADIO_SELECT_SYNCWORD_2_3   0x60
-#define SX1280_RADIO_SELECT_SYNCWORD_1_2_3 0x70
+enum sx1280_sync_word_match {
+  SX1280_RADIO_SELECT_SYNCWORD_OFF   = 0x00,
+  SX1280_RADIO_SELECT_SYNCWORD_1     = 0x10,
+  SX1280_RADIO_SELECT_SYNCWORD_2     = 0x20,
+  SX1280_RADIO_SELECT_SYNCWORD_1_2   = 0x30,
+  SX1280_RADIO_SELECT_SYNCWORD_3     = 0x40,
+  SX1280_RADIO_SELECT_SYNCWORD_1_3   = 0x50,
+  SX1280_RADIO_SELECT_SYNCWORD_2_3   = 0x60,
+  SX1280_RADIO_SELECT_SYNCWORD_1_2_3 = 0x70,
+};
 
-#define SX1280_RADIO_PACKET_FIXED_LENGTH    0x00
-#define SX1280_RADIO_PACKET_VARIABLE_LENGTH 0x20
+enum sx1280_packet_type {
+  SX1280_RADIO_PACKET_FIXED_LENGTH    = 0x00,
+  SX1280_RADIO_PACKET_VARIABLE_LENGTH = 0x20,
+};
 
-#define SX1280_RADIO_CRC_OFF     0x00
-#define SX1280_RADIO_CRC_1_BYTE  0x10
-#define SX1280_RADIO_CRC_2_BYTES 0x20
+enum sx1280_radio_crc {
+  SX1280_RADIO_CRC_OFF     = 0x00,
+  SX1280_RADIO_CRC_1_BYTE  = 0x10,
+  SX1280_RADIO_CRC_2_BYTES = 0x20,
+};
 
-#define SX1280_WHITENING_ENABLE  0x00
-#define SX1280_WHITENING_DISABLE 0x08
+static int sx1280_radio_crc_etoi(enum sx1280_radio_crc crc) {
+  return (int) (crc >> 4);
+}
+
+static int sx1280_radio_crc_itoe(int bytes) {
+  if (bytes < 0 || bytes > 2) {
+    return -EINVAL;
+  }
+
+  return bytes << 4;
+}
+
+enum sx1280_header_type {
+  SX1280_EXPLICIT_HEADER = 0x00,
+  SX1280_IMPLICIT_HEADER = 0x80,
+};
+
+enum sx1280_whitening {
+  SX1280_WHITENING_ENABLE  = 0x00,
+  SX1280_WHITENING_DISABLE = 0x08,
+};
 
 struct sx1280_gfsk_packet_params {
-  u8 preamble_length;
-  u8 sync_word_length;
-  u8 sync_word_match;
-  u8 header_type;
+  enum sx1280_preamble_length preamble_length;
+  enum sx1280_gfsk_sync_word_length sync_word_length;
+  enum sx1280_sync_word_match sync_word_match;
+  enum sx1280_packet_type packet_type;
   u8 payload_length;
-  u8 crc_length;
-  u8 whitening;
-} __packed;
+  enum sx1280_radio_crc crc_length;
+  enum sx1280_whitening whitening;
+};
 
-#define SX1280_FLRC_SYNC_WORD_NOSYNC   0x00
-#define SX1280_FLRC_SYNC_WORD_LEN_P32S 0x04
+enum sx1280_flrc_sync_word_length {
+  SX1280_FLRC_SYNC_WORD_NOSYNC   = 0x00,
+  SX1280_FLRC_SYNC_WORD_LEN_P32S = 0x04,
+};
 
-#define SX1280_FLRC_CRC_OFF    0x00
-#define SX1280_FLRC_CRC_2_BYTE 0x10
-#define SX1280_FLRC_CRC_3_BYTE 0x20
-#define SX1280_FLRC_CRC_4_BYTE 0x30
+enum sx1280_flrc_crc {
+  SX1280_FLRC_CRC_OFF    = 0x00,
+  SX1280_FLRC_CRC_2_BYTE = 0x10,
+  SX1280_FLRC_CRC_3_BYTE = 0x20,
+  SX1280_FLRC_CRC_4_BYTE = 0x30,
+};
 
 struct sx1280_flrc_packet_params {
-  u8 agc_preamble_length;
-  u8 sync_word_length;
-  u8 sync_word_match;
-  u8 header_type;
+  enum sx1280_preamble_length agc_preamble_length;
+  enum sx1280_flrc_sync_word_length sync_word_length;
+  enum sx1280_sync_word_match sync_word_match;
+  enum sx1280_packet_type packet_type;
   u8 payload_length;
-  u8 crc_length;
-  u8 whitening;
-} __packed;
+  enum sx1280_flrc_crc crc_length;
+  enum sx1280_whitening whitening;
+};
 
-#define SX1280_EXPLICIT_HEADER 0x00
-#define SX1280_IMPLICIT_HEADER 0x80
+enum sx1280_lora_crc {
+  SX1280_LORA_CRC_ENABLE  = 0x20,
+  SX1280_LORA_CRC_DISABLE = 0x00,
+};
 
-#define SX1280_LORA_CRC_ENABLE  0x20
-#define SX1280_LORA_CRC_DISABLE 0x00
-
-#define SX1280_LORA_IQ_INVERTED 0x00
-#define SX1280_LORA_IQ_STD      0x40
+enum sx1280_lora_iq {
+  SX1280_LORA_IQ_INVERTED = 0x00,
+  SX1280_LORA_IQ_STD      = 0x40,
+};
 
 struct sx1280_lora_packet_params {
   u8 preamble_length;
-  u8 header_type;
+  enum sx1280_header_type header_type;
   u8 payload_length;
-  u8 crc;
-  u8 invert_iq;
-} __packed;
+  enum sx1280_lora_crc crc;
+  enum sx1280_lora_iq invert_iq;
+};
 
-union sx1280_packet_params {
-  struct sx1280_flrc_packet_params flrc;
-  struct sx1280_gfsk_packet_params gfsk;
-  struct sx1280_lora_packet_params lora;
-  u8 raw[7];
+struct sx1280_packet_params {
+  enum sx1280_mode mode;
+
+  union {
+    struct sx1280_flrc_packet_params flrc;
+    struct sx1280_gfsk_packet_params gfsk;
+    struct sx1280_lora_packet_params lora;
+  };
 };
 
 enum sx1280_fsk_bitrate_bandwidth {
@@ -216,7 +289,9 @@ enum sx1280_fsk_bitrate_bandwidth {
   SX1280_FSK_BR_0_125_BW_0_3 = 0xEF,
 };
 
-inline static int sx1280_bitrate_etoi(u8 brbw) {
+inline static int sx1280_fsk_bitrate_etoi(
+  enum sx1280_fsk_bitrate_bandwidth brbw
+) {
   switch (brbw) {
   case SX1280_FSK_BR_2_000_BW_2_4:
     return 2000000;
@@ -239,12 +314,12 @@ inline static int sx1280_bitrate_etoi(u8 brbw) {
     return 250000;
   case SX1280_FSK_BR_0_125_BW_0_3:
     return 125000;
-  default:
-    return -EINVAL;
   }
+
+  return -EINVAL;
 }
 
-inline static int sx1280_bandwidth_etoi(
+inline static int sx1280_fsk_bandwidth_etoi(
   enum sx1280_fsk_bitrate_bandwidth brbw
 ) {
   switch (brbw) {
@@ -265,39 +340,76 @@ inline static int sx1280_bandwidth_etoi(
   case SX1280_FSK_BR_0_250_BW_0_3:
   case SX1280_FSK_BR_0_125_BW_0_3:
     return 300000;
-  default:
-    return -EINVAL;
   }
+
+  return -EINVAL;
 }
 
-#define SX1280_MOD_IND_0_35 0x00
-#define SX1280_MOD_IND_0_50 0x01
-#define SX1280_MOD_IND_0_75 0x02
-#define SX1280_MOD_IND_1_00 0x03
-#define SX1280_MOD_IND_1_25 0x04
-#define SX1280_MOD_IND_1_50 0x05
-#define SX1280_MOD_IND_1_75 0x06
-#define SX1280_MOD_IND_2_00 0x07
-#define SX1280_MOD_IND_2_25 0x08
-#define SX1280_MOD_IND_2_50 0x09
-#define SX1280_MOD_IND_2_75 0x0A
-#define SX1280_MOD_IND_3_00 0x0B
-#define SX1280_MOD_IND_3_25 0x0C
-#define SX1280_MOD_IND_3_50 0x0D
-#define SX1280_MOD_IND_3_75 0x0E
-#define SX1280_MOD_IND_4_00 0x0F
+enum sx1280_modulation_index {
+  SX1280_MOD_IND_0_35 = 0x00,
+  SX1280_MOD_IND_0_50 = 0x01,
+  SX1280_MOD_IND_0_75 = 0x02,
+  SX1280_MOD_IND_1_00 = 0x03,
+  SX1280_MOD_IND_1_25 = 0x04,
+  SX1280_MOD_IND_1_50 = 0x05,
+  SX1280_MOD_IND_1_75 = 0x06,
+  SX1280_MOD_IND_2_00 = 0x07,
+  SX1280_MOD_IND_2_25 = 0x08,
+  SX1280_MOD_IND_2_50 = 0x09,
+  SX1280_MOD_IND_2_75 = 0x0A,
+  SX1280_MOD_IND_3_00 = 0x0B,
+  SX1280_MOD_IND_3_25 = 0x0C,
+  SX1280_MOD_IND_3_50 = 0x0D,
+  SX1280_MOD_IND_3_75 = 0x0E,
+  SX1280_MOD_IND_4_00 = 0x0F,
+};
 
-enum sx1280_bt {
+static const char *sx1280_modulation_index_etos(
+  enum sx1280_modulation_index mod_index
+) {
+  switch (mod_index) {
+  case SX1280_MOD_IND_0_35: return "0.35";
+  case SX1280_MOD_IND_0_50: return "0.50";
+  case SX1280_MOD_IND_0_75: return "0.75";
+  case SX1280_MOD_IND_1_00: return "1.00";
+  case SX1280_MOD_IND_1_25: return "1.25";
+  case SX1280_MOD_IND_1_50: return "1.50";
+  case SX1280_MOD_IND_1_75: return "1.75";
+  case SX1280_MOD_IND_2_00: return "2.00";
+  case SX1280_MOD_IND_2_25: return "2.25";
+  case SX1280_MOD_IND_2_50: return "2.50";
+  case SX1280_MOD_IND_2_75: return "2.75";
+  case SX1280_MOD_IND_3_00: return "3.00";
+  case SX1280_MOD_IND_3_25: return "3.25";
+  case SX1280_MOD_IND_3_50: return "3.50";
+  case SX1280_MOD_IND_3_75: return "3.75";
+  case SX1280_MOD_IND_4_00: return "4.00";
+  }
+
+  return ERR_PTR(-EINVAL);
+}
+
+enum sx1280_bandwidth_time {
   SX1280_BT_OFF = 0x00,
   SX1280_BT_1_0 = 0x10,
   SX1280_BT_0_5 = 0x20,
 };
 
+static const char *sx1280_bandwidth_time_etos(enum sx1280_bandwidth_time bt) {
+  switch (bt) {
+  case SX1280_BT_OFF: return "off";
+  case SX1280_BT_0_5: return "0.5";
+  case SX1280_BT_1_0: return "1.0";
+  }
+
+  return ERR_PTR(-EINVAL);
+}
+
 struct sx1280_gfsk_modulation_params {
-  u8 bitrate_bandwidth;
-  u8 modulation_index;
-  u8 bandwidth_time;
-} __packed;
+  enum sx1280_fsk_bitrate_bandwidth bitrate_bandwidth;
+  enum sx1280_modulation_index modulation_index;
+  enum sx1280_bandwidth_time bandwidth_time;
+};
 
 enum sx1280_flrc_bitrate_bandwidth {
   SX1280_FLRC_BR_1_300_BW_1_2 = 0x45,
@@ -315,10 +427,10 @@ enum sx1280_flrc_coding_rate {
 };
 
 struct sx1280_flrc_modulation_params {
-  u8 bitrate_bandwidth;
-  u8 coding_rate;
-  u8 bandwidth_time;
-} __packed;
+  enum sx1280_flrc_bitrate_bandwidth bitrate_bandwidth;
+  enum sx1280_flrc_coding_rate coding_rate;
+  enum sx1280_bandwidth_time bandwidth_time;
+};
 
 enum sx1280_lora_spreading_factor {
   SX1280_LORA_SF_5  = 0x50,
@@ -349,16 +461,19 @@ enum sx1280_lora_coding_rate {
 };
 
 struct sx1280_lora_modulation_params {
-  u8 spreading;
-  u8 bandwidth;
-  u8 coding_rate;
-} __packed;
+  enum sx1280_lora_spreading_factor spreading_factor;
+  enum sx1280_lora_bandwidth bandwidth;
+  enum sx1280_lora_coding_rate coding_rate;
+};
 
-union sx1280_modulation_params {
-  struct sx1280_gfsk_modulation_params gfsk;
-  struct sx1280_flrc_modulation_params flrc;
-  struct sx1280_lora_modulation_params lora;
-  u8 raw[3];
+struct sx1280_modulation_params {
+  enum sx1280_mode mode;
+
+  union {
+    struct sx1280_flrc_modulation_params flrc;
+    struct sx1280_gfsk_modulation_params gfsk;
+    struct sx1280_lora_modulation_params lora;
+  };
 };
 
 struct sx1280_packet_status_gfsk_flrc {
@@ -425,84 +540,90 @@ union sx1280_packet_status {
 #define SX1280_STATUS_COMMAND_STATUS_MASK GENMASK(4, 2)
 
 /* Circuit modes (field of GetStatus) */
-#define SX1280_CIRCUIT_MODE_STDBY_RC   0x2
-#define SX1280_CIRCUIT_MODE_STDBY_XOSC 0x3
-#define SX1280_CIRCUIT_MODE_FS         0x4
-#define SX1280_CIRCUIT_MODE_RX         0x5
-#define SX1280_CIRCUIT_MODE_TX         0x6
+enum sx1280_circuit_mode {
+  SX1280_CIRCUIT_MODE_STDBY_RC   = 0x2,
+  SX1280_CIRCUIT_MODE_STDBY_XOSC = 0x3,
+  SX1280_CIRCUIT_MODE_FS         = 0x4,
+  SX1280_CIRCUIT_MODE_RX         = 0x5,
+  SX1280_CIRCUIT_MODE_TX         = 0x6,
+};
 
 /* Command statuses (field of GetStatus) */
-#define SX1280_COMMAND_STATUS_TX_PROCESSED     0x1
-#define SX1280_COMMAND_STATUS_DATA_AVAILABLE   0x2
-#define SX1280_COMMAND_STATUS_TIMEOUT          0x3
-#define SX1280_COMMAND_STATUS_PROCESSING_ERROR 0x4
-#define SX1280_COMMAND_STATUS_EXEC_FAILURE     0x5
-#define SX1280_COMMAND_STATUS_TX_DONE          0x6
+enum sx1280_command_status {
+  SX1280_COMMAND_STATUS_TX_PROCESSED     = 0x1,
+  SX1280_COMMAND_STATUS_DATA_AVAILABLE   = 0x2,
+  SX1280_COMMAND_STATUS_TIMEOUT          = 0x3,
+  SX1280_COMMAND_STATUS_PROCESSING_ERROR = 0x4,
+  SX1280_COMMAND_STATUS_EXEC_FAILURE     = 0x5,
+  SX1280_COMMAND_STATUS_TX_DONE          = 0x6,
+};
 
 /* Registers */
-#define SX1280_REG_FIRMWARE_VERSION               0x153
-#define SX1280_REG_RX_GAIN                        0x891
-#define SX1280_REG_MANUAL_GAIN_SETTING            0x895
-#define SX1280_REG_LNA_GAIN_VALUE                 0x89E
-#define SX1280_REG_LNA_GAIN_CONTROL               0x89F
-#define SX1280_REG_SYNCH_PEAK_ATTENUATION         0x8C2
-#define SX1280_REG_PAYLOAD_LENGTH                 0x901
-#define SX1280_REG_LORA_HEADER_MODE               0x903
-#define SX1280_REG_RANGING_REQUEST_ADDRESS_BYTE_3 0x912
-#define SX1280_REG_RANGING_REQUEST_ADDRESS_BYTE_2 0x913
-#define SX1280_REG_RANGING_REQUEST_ADDRESS_BYTE_1 0x914
-#define SX1280_REG_RANGING_REQUEST_ADDRESS_BYTE_0 0x915
-#define SX1280_REG_RANGING_DEVICE_ADDRESS_BYTE_3  0x916
-#define SX1280_REG_RANGING_DEVICE_ADDRESS_BYTE_2  0x917
-#define SX1280_REG_RANGING_DEVICE_ADDRESS_BYTE_1  0x918
-#define SX1280_REG_RANGING_DEVICE_ADDRESS_BYTE_0  0x919
-#define SX1280_REG_RANGING_FILTER_WINDOW_SIZE     0x91E
-#define SX1280_REG_RESET_RANGING_FILTER           0x923
-#define SX1280_REG_RANGING_RESULT_MUX             0x924
-#define SX1280_REG_SF_ADDITIONAL_CONFIGURATION    0x925
-#define SX1280_REG_RANGING_CALIBRATION_BYTE_2     0x92B
-#define SX1280_REG_RANGING_CALIBRATION_BYTE_1     0x92C
-#define SX1280_REG_RANGING_CALIBRATION_BYTE_0     0x92D
-#define SX1280_REG_RANGING_ID_CHECK_LENGTH        0x931
-#define SX1280_REG_FREQUENCY_ERROR_CORRECTION     0x93C
-#define SX1280_REG_CAD_DET_PEAK                   0x942
-#define SX1280_REG_LORA_SYNC_WORD_1               0x944
-#define SX1280_REG_LORA_SYNC_WORD_2               0x945
-#define SX1280_REG_HEADER_CRC                     0x954
-#define SX1280_REG_CODING_RATE                    0x950
-#define SX1280_REG_FEI_BYTE_2                     0x954
-#define SX1280_REG_FEI_BYTE_1                     0x955
-#define SX1280_REG_FEI_BYTE_0                     0x956
-#define SX1280_REG_RANGING_RESULT_BYTE_2          0x961
-#define SX1280_REG_RANGING_RESULT_BYTE_1          0x962
-#define SX1280_REG_RANGING_RESULT_BYTE_0          0x963
-#define SX1280_REG_RANGING_RSSI                   0x964
-#define SX1280_REG_FREEZE_RANGING_RESULT          0x97F
-#define SX1280_REG_PACKET_PREAMBLE_SETTINGS       0x9C1
-#define SX1280_REG_WHITENING_INITIAL_VALUE        0x9C5
-#define SX1280_REG_CRC_POLYNOMIAL_DEFINITION_MSB  0x9C6
-#define SX1280_REG_CRC_POLYNOMIAL_DEFINITION_LSB  0x9C7
-#define SX1280_REG_CRC_POLYNOMIAL_SEED_BYTE_2     0x9C7
-#define SX1280_REG_CRC_POLYNOMIAL_SEED_BYTE_1     0x9C8
-#define SX1280_REG_CRC_POLYNOMIAL_SEED_BYTE_0     0x9C9
-#define SX1280_REG_CRC_MSB_INITIAL_VALUE          0x9C8
-#define SX1280_REG_CRC_LSB_INITIAL_VALUE          0x9C9
-#define SX1280_REG_SYNCH_ADDRESS_CONTROL          0x9CD
-#define SX1280_REG_SYNC_ADDRESS_1_BYTE_4          0x9CE
-#define SX1280_REG_SYNC_ADDRESS_1_BYTE_3          0x9CF
-#define SX1280_REG_SYNC_ADDRESS_1_BYTE_2          0x9D0
-#define SX1280_REG_SYNC_ADDRESS_1_BYTE_1          0x9D1
-#define SX1280_REG_SYNC_ADDRESS_1_BYTE_0          0x9D2
-#define SX1280_REG_SYNC_ADDRESS_2_BYTE_4          0x9D3
-#define SX1280_REG_SYNC_ADDRESS_2_BYTE_3          0x9D4
-#define SX1280_REG_SYNC_ADDRESS_2_BYTE_2          0x9D5
-#define SX1280_REG_SYNC_ADDRESS_2_BYTE_1          0x9D6
-#define SX1280_REG_SYNC_ADDRESS_2_BYTE_0          0x9D7
-#define SX1280_REG_SYNC_ADDRESS_3_BYTE_4          0x9D8
-#define SX1280_REG_SYNC_ADDRESS_3_BYTE_3          0x9D9
-#define SX1280_REG_SYNC_ADDRESS_3_BYTE_2          0x9DA
-#define SX1280_REG_SYNC_ADDRESS_3_BYTE_1          0x9DB
-#define SX1280_REG_SYNC_ADDRESS_3_BYTE_0          0x9DC
+enum sx1280_register {
+  SX1280_REG_FIRMWARE_VERSION               = 0x153,
+  SX1280_REG_RX_GAIN                        = 0x891,
+  SX1280_REG_MANUAL_GAIN_SETTING            = 0x895,
+  SX1280_REG_LNA_GAIN_VALUE                 = 0x89E,
+  SX1280_REG_LNA_GAIN_CONTROL               = 0x89F,
+  SX1280_REG_SYNCH_PEAK_ATTENUATION         = 0x8C2,
+  SX1280_REG_PAYLOAD_LENGTH                 = 0x901,
+  SX1280_REG_LORA_HEADER_MODE               = 0x903,
+  SX1280_REG_RANGING_REQUEST_ADDRESS_BYTE_3 = 0x912,
+  SX1280_REG_RANGING_REQUEST_ADDRESS_BYTE_2 = 0x913,
+  SX1280_REG_RANGING_REQUEST_ADDRESS_BYTE_1 = 0x914,
+  SX1280_REG_RANGING_REQUEST_ADDRESS_BYTE_0 = 0x915,
+  SX1280_REG_RANGING_DEVICE_ADDRESS_BYTE_3  = 0x916,
+  SX1280_REG_RANGING_DEVICE_ADDRESS_BYTE_2  = 0x917,
+  SX1280_REG_RANGING_DEVICE_ADDRESS_BYTE_1  = 0x918,
+  SX1280_REG_RANGING_DEVICE_ADDRESS_BYTE_0  = 0x919,
+  SX1280_REG_RANGING_FILTER_WINDOW_SIZE     = 0x91E,
+  SX1280_REG_RESET_RANGING_FILTER           = 0x923,
+  SX1280_REG_RANGING_RESULT_MUX             = 0x924,
+  SX1280_REG_SF_ADDITIONAL_CONFIGURATION    = 0x925,
+  SX1280_REG_RANGING_CALIBRATION_BYTE_2     = 0x92B,
+  SX1280_REG_RANGING_CALIBRATION_BYTE_1     = 0x92C,
+  SX1280_REG_RANGING_CALIBRATION_BYTE_0     = 0x92D,
+  SX1280_REG_RANGING_ID_CHECK_LENGTH        = 0x931,
+  SX1280_REG_FREQUENCY_ERROR_CORRECTION     = 0x93C,
+  SX1280_REG_CAD_DET_PEAK                   = 0x942,
+  SX1280_REG_LORA_SYNC_WORD_1               = 0x944,
+  SX1280_REG_LORA_SYNC_WORD_2               = 0x945,
+  SX1280_REG_HEADER_CRC                     = 0x954,
+  SX1280_REG_CODING_RATE                    = 0x950,
+  SX1280_REG_FEI_BYTE_2                     = 0x954,
+  SX1280_REG_FEI_BYTE_1                     = 0x955,
+  SX1280_REG_FEI_BYTE_0                     = 0x956,
+  SX1280_REG_RANGING_RESULT_BYTE_2          = 0x961,
+  SX1280_REG_RANGING_RESULT_BYTE_1          = 0x962,
+  SX1280_REG_RANGING_RESULT_BYTE_0          = 0x963,
+  SX1280_REG_RANGING_RSSI                   = 0x964,
+  SX1280_REG_FREEZE_RANGING_RESULT          = 0x97F,
+  SX1280_REG_PACKET_PREAMBLE_SETTINGS       = 0x9C1,
+  SX1280_REG_WHITENING_INITIAL_VALUE        = 0x9C5,
+  SX1280_REG_CRC_POLYNOMIAL_DEFINITION_MSB  = 0x9C6,
+  SX1280_REG_CRC_POLYNOMIAL_DEFINITION_LSB  = 0x9C7,
+  SX1280_REG_CRC_POLYNOMIAL_SEED_BYTE_2     = 0x9C7,
+  SX1280_REG_CRC_POLYNOMIAL_SEED_BYTE_1     = 0x9C8,
+  SX1280_REG_CRC_POLYNOMIAL_SEED_BYTE_0     = 0x9C9,
+  SX1280_REG_CRC_MSB_INITIAL_VALUE          = 0x9C8,
+  SX1280_REG_CRC_LSB_INITIAL_VALUE          = 0x9C9,
+  SX1280_REG_SYNCH_ADDRESS_CONTROL          = 0x9CD,
+  SX1280_REG_SYNC_ADDRESS_1_BYTE_4          = 0x9CE,
+  SX1280_REG_SYNC_ADDRESS_1_BYTE_3          = 0x9CF,
+  SX1280_REG_SYNC_ADDRESS_1_BYTE_2          = 0x9D0,
+  SX1280_REG_SYNC_ADDRESS_1_BYTE_1          = 0x9D1,
+  SX1280_REG_SYNC_ADDRESS_1_BYTE_0          = 0x9D2,
+  SX1280_REG_SYNC_ADDRESS_2_BYTE_4          = 0x9D3,
+  SX1280_REG_SYNC_ADDRESS_2_BYTE_3          = 0x9D4,
+  SX1280_REG_SYNC_ADDRESS_2_BYTE_2          = 0x9D5,
+  SX1280_REG_SYNC_ADDRESS_2_BYTE_1          = 0x9D6,
+  SX1280_REG_SYNC_ADDRESS_2_BYTE_0          = 0x9D7,
+  SX1280_REG_SYNC_ADDRESS_3_BYTE_4          = 0x9D8,
+  SX1280_REG_SYNC_ADDRESS_3_BYTE_3          = 0x9D9,
+  SX1280_REG_SYNC_ADDRESS_3_BYTE_2          = 0x9DA,
+  SX1280_REG_SYNC_ADDRESS_3_BYTE_1          = 0x9DB,
+  SX1280_REG_SYNC_ADDRESS_3_BYTE_0          = 0x9DC,
+};
 
 /* Limits */
 #define SX1280_FLRC_PAYLOAD_LENGTH_MAX 127
@@ -615,7 +736,7 @@ static const struct sx1280_config sx1280_default_config = {
     .packet = {
       .agc_preamble_length = SX1280_PREAMBLE_LENGTH_08_BITS,
       .crc_length = SX1280_FLRC_CRC_2_BYTE,
-      .header_type = SX1280_RADIO_PACKET_VARIABLE_LENGTH,
+      .packet_type = SX1280_RADIO_PACKET_VARIABLE_LENGTH,
       .payload_length = SX1280_FLRC_PAYLOAD_LENGTH_MAX,
       .sync_word_length = SX1280_FLRC_SYNC_WORD_LEN_P32S,
       .sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_1,
@@ -632,7 +753,7 @@ static const struct sx1280_config sx1280_default_config = {
     },
     .packet = {
       .crc_length = SX1280_RADIO_CRC_2_BYTES,
-      .header_type = SX1280_RADIO_PACKET_VARIABLE_LENGTH,
+      .packet_type = SX1280_RADIO_PACKET_VARIABLE_LENGTH,
       .payload_length = SX1280_GFSK_PAYLOAD_LENGTH_MAX,
       .preamble_length = SX1280_PREAMBLE_LENGTH_08_BITS,
       .sync_word_length = SX1280_SYNC_WORD_LEN_4_B,
@@ -644,11 +765,11 @@ static const struct sx1280_config sx1280_default_config = {
     .modulation = {
       .bandwidth = SX1280_LORA_BW_1600,
       .coding_rate = SX1280_LORA_CR_4_7,
-      .spreading = SX1280_LORA_SF_12,
+      .spreading_factor = SX1280_LORA_SF_12,
     },
     .packet = {
       .crc = SX1280_LORA_CRC_ENABLE,
-      .header_type = SX1280_RADIO_PACKET_VARIABLE_LENGTH,
+      .header_type = SX1280_EXPLICIT_HEADER,
       .invert_iq = SX1280_LORA_IQ_STD,
       .payload_length = SX1280_LORA_PAYLOAD_LENGTH_MAX,
       .preamble_length = SX1280_PREAMBLE_LENGTH_08_BITS,
@@ -657,7 +778,7 @@ static const struct sx1280_config sx1280_default_config = {
   .ranging = {},
 };
 
-#define SX1280_STARTUP_TIMEOUT_MS 100
+#define SX1280_BUSY_TIMEOUT_US 100000
 
 /* The private, internal structure for the SX1280 driver. */
 struct sx1280_priv {
@@ -742,7 +863,7 @@ static int sx1280_wait_busy(struct sx1280_priv *priv) {
 
     if (wait < 50) {
       cpu_relax();
-    } else if (wait < 10000) { /* TODO: no magic numbers */
+    } else if (wait < SX1280_BUSY_TIMEOUT_US) {
       usleep_range(20, 40);
     } else {
       return -ETIMEDOUT;
@@ -1245,15 +1366,31 @@ static int sx1280_set_buffer_base_address(
 
 static int sx1280_set_modulation_params(
   struct sx1280_priv *priv,
-  union sx1280_modulation_params params
+  struct sx1280_modulation_params params
 ) {
   int err;
-  u8 tx[4] = {
-    SX1280_CMD_SET_MODULATION_PARAMS,
-  };
+  u8 tx[4] = { SX1280_CMD_SET_MODULATION_PARAMS };
 
-
-  memcpy(&tx[1], params.raw, 3);
+  switch (params.mode) {
+  case SX1280_MODE_FLRC:
+    tx[1] = (u8) params.flrc.bitrate_bandwidth;
+    tx[2] = (u8) params.flrc.coding_rate;
+    tx[3] = (u8) params.flrc.bandwidth_time;
+    break;
+  case SX1280_MODE_GFSK:
+    tx[1] = (u8) params.gfsk.bitrate_bandwidth;
+    tx[2] = (u8) params.gfsk.modulation_index;
+    tx[3] = (u8) params.gfsk.bandwidth_time;
+    break;
+  case SX1280_MODE_LORA:
+  case SX1280_MODE_RANGING:
+    tx[1] = (u8) params.lora.spreading_factor;
+    tx[2] = (u8) params.lora.bandwidth;
+    tx[3] = (u8) params.lora.coding_rate;
+    break;
+  default:
+    return -EINVAL;
+  }
 
   if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
     dev_err(&priv->spi->dev, "SetModulationParams failed: %d\n", err);
@@ -1265,13 +1402,43 @@ static int sx1280_set_modulation_params(
 
 static int sx1280_set_packet_params(
   struct sx1280_priv *priv,
-  union sx1280_packet_params params
+  struct sx1280_packet_params params
 ) {
   int err;
   u8 tx[8] = {
     SX1280_CMD_SET_PACKET_PARAMS
   };
-  memcpy(&tx[1], params.raw, 7);
+
+  switch (params.mode) {
+  case SX1280_MODE_FLRC:
+    tx[1] = (u8) params.flrc.agc_preamble_length;
+    tx[2] = (u8) params.flrc.sync_word_length;
+    tx[3] = (u8) params.flrc.sync_word_match;
+    tx[4] = (u8) params.flrc.packet_type;
+    tx[5] = (u8) params.flrc.payload_length;
+    tx[6] = (u8) params.flrc.crc_length;
+    tx[7] = (u8) params.flrc.whitening;
+    break;
+  case SX1280_MODE_GFSK:
+    tx[1] = (u8) params.gfsk.preamble_length;
+    tx[2] = (u8) params.gfsk.sync_word_length;
+    tx[3] = (u8) params.gfsk.sync_word_match;
+    tx[4] = (u8) params.gfsk.packet_type;
+    tx[5] = (u8) params.gfsk.payload_length;
+    tx[6] = (u8) params.gfsk.crc_length;
+    tx[7] = (u8) params.gfsk.whitening;
+    break;
+  case SX1280_MODE_LORA:
+  case SX1280_MODE_RANGING:
+    tx[1] = (u8) params.lora.preamble_length;
+    tx[2] = (u8) params.lora.header_type;
+    tx[3] = (u8) params.lora.payload_length;
+    tx[4] = (u8) params.lora.crc;
+    tx[5] = (u8) params.lora.invert_iq;
+    break;
+  default:
+    return -EINVAL;
+  }
 
   if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
     dev_err(&priv->spi->dev, "SetPacketParams: %d\n", err);
@@ -1571,8 +1738,8 @@ static void sx1280_tx_work(struct work_struct *work) {
 
   mutex_lock(&priv->lock);
 
-  union sx1280_packet_params params;
-  switch (priv->cfg.mode) {
+  struct sx1280_packet_params params = { .mode = priv->cfg.mode };
+  switch (params.mode) {
   case SX1280_MODE_FLRC:
     params.flrc = priv->cfg.flrc.packet;
 
@@ -1687,26 +1854,27 @@ static void sx1280_check_status(struct work_struct *work) {
 static int sx1280_listen(struct sx1280_priv *priv) {
   int err;
 
-  union sx1280_packet_params pkt_params;
-  switch (priv->cfg.mode) {
+  struct sx1280_packet_params packet_params = { .mode = priv->cfg.mode };
+  switch (packet_params.mode) {
   case SX1280_MODE_FLRC:
-    pkt_params.flrc = priv->cfg.flrc.packet;
-    pkt_params.flrc.payload_length = SX1280_FLRC_PAYLOAD_LENGTH_MAX;
+    packet_params.flrc = priv->cfg.flrc.packet;
+    packet_params.flrc.payload_length = SX1280_FLRC_PAYLOAD_LENGTH_MAX;
     break;
   case SX1280_MODE_GFSK:
-    pkt_params.gfsk = priv->cfg.gfsk.packet;
-    pkt_params.gfsk.payload_length = SX1280_GFSK_PAYLOAD_LENGTH_MAX;
+    packet_params.gfsk = priv->cfg.gfsk.packet;
+    packet_params.gfsk.payload_length = SX1280_GFSK_PAYLOAD_LENGTH_MAX;
     break;
   case SX1280_MODE_LORA:
-    pkt_params.lora = priv->cfg.lora.packet;
-    pkt_params.lora.payload_length = SX1280_LORA_PAYLOAD_LENGTH_MAX;
+    packet_params.lora = priv->cfg.lora.packet;
+    packet_params.lora.payload_length = SX1280_LORA_PAYLOAD_LENGTH_MAX;
     break;
   case SX1280_MODE_RANGING:
+    /* TODO */
     break;
   }
 
   if (
-    (err = sx1280_set_packet_params(priv, pkt_params))
+    (err = sx1280_set_packet_params(priv, packet_params))
     || (err = sx1280_set_rx(priv, SX1280_PERIOD_BASE_15_625_US, 0xFFFF))
   ) {
     dev_err(&priv->spi->dev, "failed to transition to listen\n");
@@ -1878,147 +2046,6 @@ unlock:
   mutex_unlock(&priv->lock);
   return IRQ_HANDLED;
 }
-
-// static int sx1280_parse_dt_gfsk(struct sx1280_priv *priv) {
-//   /* Convenience definitions for conciseness. */
-//   struct sx1280_gfsk_params *gfsk = &pdata->gfsk;
-//   struct sx1280_gfsk_modulation_params *mod = &gfsk->modulation;
-//   struct sx1280_gfsk_packet_params *pkt = &gfsk->packet;
-//   struct device *dev = &priv->spi->dev;
-//
-//   /* Populate defaults for GFSK mode. */
-//   u16 bitrate_kbs = 2000;
-//   u16 bandwidth_khz = 2400;
-//   u32 mod_index = 50;
-//   const char *bt = "0.5";
-//   u32 preamble_bits = 32;
-//   u32 sync_word_bytes = 5;
-//   u32 sync_word_match[3] = { 1, 0, 0 };
-//   bool fixed_length = false;
-//   u32 crc_bytes = 2;
-//   bool disable_whitening = false;
-//   u32 sync_words[3] = { 0, 0, 0 };
-//   u16 crc_seed = SX1280_DEFAULT_GFSK_CRC_SEED;
-//   u16 crc_polynomial = SX1280_DEFAULT_GFSK_CRC_POLYNOMIAL;
-//
-//   struct device_node *child = of_get_child_by_name(dev->of_node, "gfsk");
-//
-//   if (child) {
-//     /* TODO: Handle errors other than being not present. */
-//     of_property_read_u16(child, "bitrate-kbs", &bitrate_kbs);
-//     of_property_read_u16(child, "bandwidth-khz", &bandwidth_khz);
-//     of_property_read_u32(child, "modulation-index", &mod_index);
-//     of_property_read_string(child, "bt", &bt);
-//     of_property_read_u32(child, "preamble-bits", &preamble_bits);
-//     of_property_read_u32(child, "sync-word-bytes", &sync_word_bytes);
-//     of_property_read_u32_array(child, "sync-word-match", sync_word_match, 3);
-//     fixed_length = of_property_read_bool(child, "fixed-length");
-//     of_property_read_u32(child, "crc-bytes", &crc_bytes);
-//     disable_whitening = of_property_read_bool(child, "disable-whitening");
-//     of_property_read_variable_u32_array(child, "sync-words", sync_words, 0, 3);
-//     of_property_read_u16(child, "crc-seed", &crc_seed);
-//     of_property_read_u16(child, "crc-polynomial", &crc_polynomial);
-//
-//     of_node_put(child);
-//   }
-//
-//   /* Bitrate-bandwidth */
-//   u32 brbw = CONCAT32(bitrate_kbs, bandwidth_khz);
-//
-//   switch (brbw) {
-//     MATCH2(2000, 2400, SX1280_FSK_BR_2_000_BW_2_4)
-//     MATCH2(1600, 2400, SX1280_FSK_BR_1_600_BW_2_4)
-//     MATCH2(1000, 2400, SX1280_FSK_BR_1_000_BW_2_4)
-//     MATCH2(1000, 1200, SX1280_FSK_BR_1_000_BW_1_2)
-//     MATCH2(800, 2400, SX1280_FSK_BR_0_800_BW_2_4)
-//     MATCH2(800, 1200, SX1280_FSK_BR_0_800_BW_1_2)
-//     MATCH2(500, 1200, SX1280_FSK_BR_0_500_BW_1_2)
-//     MATCH2(500, 600, SX1280_FSK_BR_0_500_BW_0_6)
-//     MATCH2(400, 1200, SX1280_FSK_BR_0_400_BW_1_2)
-//     MATCH2(400, 600, SX1280_FSK_BR_0_400_BW_0_6)
-//     MATCH2(250, 600, SX1280_FSK_BR_0_250_BW_0_6)
-//     MATCH2(250, 300, SX1280_FSK_BR_0_250_BW_0_3)
-//     MATCH2(125, 300, SX1280_FSK_BR_0_125_BW_0_3)
-//   default:
-//     dev_err(
-//       dev,
-//       "Invalid combination of gfsk.bitrate-kbs and gfsk.bandwidth-khz.\n"
-//     );
-//     return -EINVAL;
-//   }
-//
-//   /* Modulation index */
-//   if (
-//     (mod_index % 25 != 0 && mod_index != 35)
-//     || mod_index > 400
-//   ) {
-//     dev_err(dev, "Invalid value for gfsk.modulation-index.\n");
-//     return -EINVAL;
-//   }
-//
-//   mod->modulation_index = mod_index / 25 - 1;
-//
-//   /* Bandwidth-time */
-//   if (strcmp(bt, "off") == 0) {
-//     mod->bandwidth_time = SX1280_BT_OFF;
-//   } else if (strcmp(bt, "1.0") == 0) {
-//     mod->bandwidth_time = SX1280_BT_1_0;
-//   } else if (strcmp(bt, "0.5") == 0) {
-//     mod->bandwidth_time = SX1280_BT_0_5;
-//   } else {
-//     dev_err(dev, "Invalid value for gfsk.bt.\n");
-//     return -EINVAL;
-//   }
-//
-//   /* Preamble length (bits) */
-//   if (
-//     preamble_bits % 4 != 0
-//     || preamble_bits > 32
-//     || preamble_bits < 4
-//   ) {
-//     dev_err(dev, "Invalid value for gfsk.preamble-bits.\n");
-//     return -EINVAL;
-//   }
-//
-//   pkt->preamble_length = (preamble_bits << 2) - 0x10;
-//
-//   /* Sync word length */
-//   if (sync_word_bytes < 1 || sync_word_bytes > 5) {
-//     dev_err(dev, "Invalid value for gfsk.sync-word-bytes.\n");
-//     return -EINVAL;
-//   }
-//
-//   pkt->sync_word_length = ((sync_word_bytes - 1) * 2);
-//
-//   /* Sync word combination */
-//   pkt->sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_OFF;
-//
-//   for (int i = 0; i < 2; i++) {
-//     if (sync_word_match[i] > 1) {
-//       dev_err(dev, "Invalid value for gfsk.sync-word-match.\n");
-//       return -EINVAL;
-//     }
-//
-//     pkt->sync_word_match |= sync_word_match[i] << (i + 4);
-//   }
-//
-//   /* Header type */
-//   pkt->header_type = SX1280_RADIO_PACKET_VARIABLE_LENGTH;
-//
-//   /* CRC bytes */
-//   pkt->crc_length = crc_bytes << 4;
-//
-//   /* Whitening */
-//   pkt->whitening = disable_whitening
-//     ? SX1280_WHITENING_DISABLE
-//     : SX1280_WHITENING_ENABLE;
-//
-//   /* CRC */
-//   gfsk->crc_seed = crc_seed;
-//   gfsk->crc_polynomial = crc_polynomial;
-//
-//   return 0;
-// }
 
 // static int sx1280_parse_dt_lora(struct sx1280_priv *priv) {
 //   /* Convenience definitions for conciseness. */
@@ -2492,7 +2519,10 @@ static int sx1280_setup(struct sx1280_priv *priv) {
    * Extract the modulation and packet params from the platform data, depending
    * on the mode that the chip is being commanded into.
    */
-  union sx1280_modulation_params mod_params = { .gfsk = cfg->gfsk.modulation };
+  struct sx1280_modulation_params mod_params = {
+    .mode = SX1280_MODE_GFSK,
+    .gfsk = cfg->gfsk.modulation,
+  };
 
   if (
     (err = sx1280_set_rf_frequency(priv, cfg->freq))
@@ -2553,10 +2583,10 @@ static const struct net_device_ops sx1280_netdev_ops = {
  *
  * @context - process & unlocked
  */
-static int sx1280_acquire_idle(struct sx1280_priv *priv) {
+static int sx1280_acquire_idle(struct sx1280_priv *priv, bool locked) {
   int err;
 
-  if ((err = mutex_lock_interruptible(&priv->lock))) {
+  if (!locked && (err = mutex_lock_interruptible(&priv->lock))) {
     return err;
   }
 
@@ -2575,6 +2605,32 @@ static int sx1280_acquire_idle(struct sx1280_priv *priv) {
 }
 
 /**
+ * Acquires the shared lock no matter the mode, but additionally waits for idle
+ * if the mode is the one specified.
+ *
+ * Note that the mode must still be checked after this function exits, as the
+ * mode may have changed since released and re-acquiring the mutex while waiting
+ * for idle.
+ */
+static int sx1280_acquire_idle_if_mode(
+  struct sx1280_priv *priv,
+  enum sx1280_mode mode,
+  bool locked
+) {
+  int err;
+
+  /* The mutex must be locked before accessing priv->cfg.mode. */
+  if (
+    (!locked && (err = mutex_lock_interruptible(&priv->lock)))
+    || (priv->cfg.mode == mode && (err = sx1280_acquire_idle(priv, true)))
+  ) {
+    return err;
+  }
+
+  return 0;
+}
+
+/**
  * Acquires the shared lock by waiting until idle before switching into standby
  * mode, so that the chip configuration can be changed. The wait times out after
  * 1 second.
@@ -2584,10 +2640,10 @@ static int sx1280_acquire_idle(struct sx1280_priv *priv) {
  *
  * @context - process & unlocked
  */
-static int sx1280_acquire_stdby(struct sx1280_priv *priv) {
+static int sx1280_acquire_stdby(struct sx1280_priv *priv, bool locked) {
   int err;
 
-  if ((err = sx1280_acquire_idle(priv))) {
+  if ((err = sx1280_acquire_idle(priv, locked))) {
     return err;
   }
 
@@ -2616,25 +2672,11 @@ static ssize_t mode_show(
     return err;
   }
 
-  const char *mode_str;
-  switch (priv->cfg.mode) {
-  case SX1280_MODE_FLRC:
-    mode_str = "flrc";
-    break;
-    return sprintf(buf, "flrc\n");
-  case SX1280_MODE_GFSK:
-    return sprintf(buf, "gfsk\n");
-  case SX1280_MODE_LORA:
-    return sprintf(buf, "lora\n");
-  case SX1280_MODE_RANGING:
-    return sprintf(buf, "ranging\n");
-  }
-
+  const char *mode_str = sx1280_mode_etos(priv->cfg.mode);
   int count = sprintf(buf, "%s\n", mode_str);
 
-fail:
   mutex_unlock(&priv->lock);
-  return err ? err : count;
+  return count;
 }
 
 static ssize_t mode_store(
@@ -2643,6 +2685,7 @@ static ssize_t mode_store(
   const char *buf,
   size_t count
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
@@ -2659,8 +2702,11 @@ static ssize_t mode_store(
     return -EINVAL;
   }
 
-  mutex_lock(&priv->lock);
-  int err = sx1280_set_packet_type(priv, new_mode);
+  if ((err = sx1280_acquire_stdby(priv, false))) {
+    return err;
+  }
+
+  err = sx1280_set_packet_type(priv, new_mode);
   mutex_unlock(&priv->lock);
   return err ? err : count;
 }
@@ -2670,10 +2716,17 @@ static ssize_t tx_power_show(
   struct device_attribute *attr,
   char *buf
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
-  return sprintf(buf, "%d\n", (s32) priv->cfg.power - 18);
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
+  }
+
+  int count = sprintf(buf, "%d\n", (s32) priv->cfg.power - 18);
+  mutex_unlock(&priv->lock);
+  return err ? err : count;
 }
 
 /**
@@ -2699,7 +2752,7 @@ static ssize_t tx_power_store(
     return -EINVAL;
   }
 
-  if ((err = sx1280_acquire_idle(priv))) {
+  if ((err = sx1280_acquire_idle(priv, false))) {
     return err;
   }
 
@@ -2732,38 +2785,19 @@ static ssize_t ramp_time_show(
   struct device_attribute *attr,
   char *buf
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
-  u32 ramp_time_us;
-  switch (priv->cfg.ramp_time) {
-  case SX1280_RADIO_RAMP_02_US:
-    ramp_time_us = 2;
-    break;
-  case SX1280_RADIO_RAMP_04_US:
-    ramp_time_us = 4;
-    break;
-  case SX1280_RADIO_RAMP_06_US:
-    ramp_time_us = 6;
-    break;
-  case SX1280_RADIO_RAMP_08_US:
-    ramp_time_us = 8;
-    break;
-  case SX1280_RADIO_RAMP_10_US:
-    ramp_time_us = 10;
-    break;
-  case SX1280_RADIO_RAMP_12_US:
-    ramp_time_us = 12;
-    break;
-  case SX1280_RADIO_RAMP_16_US:
-    ramp_time_us = 16;
-    break;
-  case SX1280_RADIO_RAMP_20_US:
-    ramp_time_us = 20;
-    break;
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
   }
+  
+  int ramp_time_us = sx1280_ramp_time_etoi(priv->cfg.ramp_time);
+  int count = sprintf(buf, "%d\n", ramp_time_us);
 
-  return sprintf(buf, "%u\n", ramp_time_us);
+  mutex_unlock(&priv->lock);
+  return count;
 }
 
 static ssize_t ramp_time_store(
@@ -2781,41 +2815,16 @@ static ssize_t ramp_time_store(
     return err;
   }
 
-  enum sx1280_ramp_time ramp_time;
-  switch (ramp_time_us) {
-  case 2:
-    ramp_time = SX1280_RADIO_RAMP_02_US;
-    break;
-  case 4:
-    ramp_time = SX1280_RADIO_RAMP_04_US;
-    break;
-  case 6:
-    ramp_time = SX1280_RADIO_RAMP_06_US;
-    break;
-  case 8:
-    ramp_time = SX1280_RADIO_RAMP_08_US;
-    break;
-  case 10:
-    ramp_time = SX1280_RADIO_RAMP_10_US;
-    break;
-  case 12:
-    ramp_time = SX1280_RADIO_RAMP_12_US;
-    break;
-  case 16:
-    ramp_time = SX1280_RADIO_RAMP_16_US;
-    break;
-  case 20:
-    ramp_time = SX1280_RADIO_RAMP_20_US;
-    break;
-  default:
-    return -EINVAL;
+  int ramp_time = sx1280_ramp_time_itoe(ramp_time_us);
+  if (ramp_time < 0) {
+    return ramp_time;
   }
 
-  if ((err = sx1280_acquire_idle(priv))) {
+  if ((err = sx1280_acquire_idle(priv, false))) {
     return err;
   }
 
-  priv->cfg.ramp_time = ramp_time;
+  priv->cfg.ramp_time = (enum sx1280_ramp_time) ramp_time;
   mutex_unlock(&priv->lock);
   return count;
 }
@@ -2825,11 +2834,19 @@ static ssize_t frequency_show(
   struct device_attribute *attr,
   char *buf
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
+  }
+
   u32 freq_hz = SX1280_FREQ_PLL_TO_HZ(priv->cfg.freq);
-  return sprintf(buf, "%u\n", freq_hz);
+  int count = sprintf(buf, "%u\n", freq_hz);
+
+  mutex_unlock(&priv->lock);
+  return count;
 }
 
 /**
@@ -2857,7 +2874,7 @@ static ssize_t frequency_store(
 
   u32 freq_pll = SX1280_FREQ_HZ_TO_PLL(freq_hz);
   
-  if ((err = sx1280_acquire_idle(priv))) {
+  if ((err = sx1280_acquire_idle(priv, false))) {
     return err;
   }
 
@@ -2877,16 +2894,25 @@ static ssize_t gfsk_bandwidth_show(
   struct device_attribute *attr,
   char *buf
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
-  u8 brbw = priv->cfg.gfsk.modulation.bitrate_bandwidth;
-  int bandwidth_hz = sx1280_bandwidth_etoi(brbw);
-  if (bandwidth_hz < 0) {
-    return bandwidth_hz;
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
   }
 
-  return sprintf(buf, "%d\n", bandwidth_hz);
+  u8 brbw = priv->cfg.gfsk.modulation.bitrate_bandwidth;
+  int bandwidth_hz = sx1280_fsk_bandwidth_etoi(brbw);
+  if (bandwidth_hz < 0) {
+    goto fail;
+  }
+
+  int count = sprintf(buf, "%d\n", bandwidth_hz);
+
+fail:
+  mutex_unlock(&priv->lock);
+  return count;
 }
 
 /**
@@ -2906,13 +2932,13 @@ static ssize_t gfsk_bandwidth_store(
   u32 bandwidth_hz;
   if (
     (err = kstrtou32(buf, 10, &bandwidth_hz))
-    || (err = sx1280_acquire_idle(priv))
+    || (err = mutex_lock_interruptible(&priv->lock))
   ) {
     return err;
   }
 
   u8 brbw = priv->cfg.gfsk.modulation.bitrate_bandwidth;
-  int bitrate = sx1280_bitrate_etoi(brbw);
+  int bitrate = sx1280_fsk_bitrate_etoi(brbw);
   if (bitrate < 0) {
     err = bitrate;
     goto fail;
@@ -2923,7 +2949,7 @@ static ssize_t gfsk_bandwidth_store(
    * chosen, and attempts to respect the existing bitrate. If the bitrate cannot
    * be respected, then pick the highest bitrate for that bandwidth.
    */
-  u8 new_brbw;
+  enum sx1280_fsk_bitrate_bandwidth new_brbw;
   switch (bandwidth_hz) {
   case 2400000:
     switch (bitrate) {
@@ -2984,8 +3010,13 @@ static ssize_t gfsk_bandwidth_store(
     goto fail;
   }
 
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, true))) {
+    return err;
+  }
+
   if (priv->cfg.mode == SX1280_MODE_GFSK) {
-    union sx1280_modulation_params mod_params = {
+    struct sx1280_modulation_params mod_params = {
+      .mode = SX1280_MODE_GFSK,
       .gfsk = priv->cfg.gfsk.modulation,
     };
     mod_params.gfsk.bitrate_bandwidth = new_brbw;
@@ -3016,15 +3047,9 @@ static ssize_t gfsk_bitrate_show(
   }
 
   u8 brbw = priv->cfg.gfsk.modulation.bitrate_bandwidth;
-  int bitrate = sx1280_bitrate_etoi(brbw);
-  if (bitrate < 0) {
-    err = bitrate;
-    goto fail;
-  }
-
+  int bitrate = sx1280_fsk_bitrate_etoi(brbw);
   int count = sprintf(buf, "%d\n", bitrate);
 
-fail:
   mutex_unlock(&priv->lock);
   return err ? err : count;
 }
@@ -3044,38 +3069,84 @@ static ssize_t gfsk_bitrate_store(
   struct sx1280_priv *priv = netdev_priv(netdev);
 
   u32 bitrate;
-  if ((err = kstrtou32(buf, 10, &bitrate))) {
+  if (
+    (err = kstrtou32(buf, 10, &bitrate))
+    || (err = mutex_lock_interruptible(&priv->lock))
+  ) {
     return err;
   }
 
-  mutex_lock(&priv->lock);
-  u8 brbw = priv->cfg.gfsk.modulation.bitrate_bandwidth;
-  int bandwidth_hz = sx1280_bandwidth_etoi(brbw);
-  if (bandwidth_hz < 0) {
-    return bandwidth_hz;
+  enum sx1280_fsk_bitrate_bandwidth brbw =
+    priv->cfg.gfsk.modulation.bitrate_bandwidth;
+  int bandwidth_hz = sx1280_fsk_bandwidth_etoi(brbw);
+
+  /*
+   * Pick the bandwidth-bitrate combination that must respect the bitrate just
+   * chosen, and attempts to respect the existing bandwidth. If the bandwidth
+   * cannot be respected, then pick the highest bandwidth for that bitrate.
+   */
+  enum sx1280_fsk_bitrate_bandwidth new_brbw;
+  switch (bitrate) {
+  case 2000000:
+    new_brbw = SX1280_FSK_BR_2_000_BW_2_4;
+    break;
+  case 1600000:
+    new_brbw = SX1280_FSK_BR_1_600_BW_2_4;
+    break;
+  case 1000000:
+    new_brbw = bandwidth_hz == 1200000
+      ? SX1280_FSK_BR_1_000_BW_1_2
+      : SX1280_FSK_BR_1_000_BW_2_4;
+    break;
+  case 800000:
+    new_brbw = bandwidth_hz == 1200000
+      ? SX1280_FSK_BR_0_800_BW_1_2
+      : SX1280_FSK_BR_0_800_BW_2_4;
+    break;
+  case 500000:
+    new_brbw = bandwidth_hz == 600000
+      ? SX1280_FSK_BR_0_500_BW_0_6
+      : SX1280_FSK_BR_0_500_BW_1_2;
+    break;
+  case 400000:
+    new_brbw = bandwidth_hz == 600000
+      ? SX1280_FSK_BR_0_400_BW_0_6
+      : SX1280_FSK_BR_0_400_BW_1_2;
+    break;
+  case 250000:
+    new_brbw = bandwidth_hz == 300000
+      ? SX1280_FSK_BR_0_250_BW_0_3
+      : SX1280_FSK_BR_0_250_BW_0_6;
+    break;
+  case 125000:
+    new_brbw = SX1280_FSK_BR_0_125_BW_0_3;
+    break;
+  default:
+    err = -EINVAL;
+    goto fail;
   }
 
-  /* Apply these settings to the GFSK radio. */
-  if (priv->cfg.mode == SX1280_MODE_GFSK) {
-    if ((err = sx1280_acquire_idle(priv))) {
-      return err;
-    }
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, true))) {
+    return err;
+  }
 
-    union sx1280_modulation_params mod_params = {
+  if (priv->cfg.mode == SX1280_MODE_GFSK) {
+    struct sx1280_modulation_params mod_params = {
+      .mode = SX1280_MODE_GFSK,
       .gfsk = priv->cfg.gfsk.modulation,
     };
-    mod_params.gfsk.bitrate_bandwidth = brbw;
+    mod_params.gfsk.bitrate_bandwidth = new_brbw;
 
     if ((err = sx1280_set_modulation_params(priv, mod_params))) {
-      mutex_unlock(&priv->lock);
-      return err;
+      goto fail;
     }
-
-    mutex_unlock(&priv->lock);
   }
 
-  priv->cfg.gfsk.modulation.bitrate_bandwidth = brbw;
-  return count;
+  priv->cfg.gfsk.modulation.bitrate_bandwidth = new_brbw;
+
+fail:
+  mutex_unlock(&priv->lock);
+  return err ? err : count;
 }
 
 static ssize_t gfsk_bandwidth_time_show(
@@ -3083,23 +3154,22 @@ static ssize_t gfsk_bandwidth_time_show(
   struct device_attribute *attr,
   char *buf
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
-  const char *bt;
-  switch (priv->cfg.gfsk.modulation.bandwidth_time) {
-  case SX1280_BT_OFF:
-    bt = "off";
-    break;
-  case SX1280_BT_0_5:
-    bt = "0.5";
-    break;
-  case SX1280_BT_1_0:
-    bt = "1.0";
-    break;
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
   }
 
-  return sprintf(buf, "%s\n", bt);
+  const char *bt = sx1280_bandwidth_time_etos(
+    priv->cfg.gfsk.modulation.bandwidth_time
+  );
+
+  int count = sprintf(buf, "%s\n", bt);
+
+  mutex_unlock(&priv->lock);
+  return count;
 }
 
 /**
@@ -3125,12 +3195,13 @@ static ssize_t gfsk_bandwidth_time_store(
     bt = SX1280_BT_1_0;
   }
 
-  if (priv->cfg.mode == SX1280_MODE_GFSK) {
-    if ((err = sx1280_acquire_idle(priv))) {
-      return err;
-    }
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, false))) {
+    return err;
+  }
 
-    union sx1280_modulation_params mod_params = {
+  if (priv->cfg.mode == SX1280_MODE_GFSK) {
+    struct sx1280_modulation_params mod_params = {
+      .mode = SX1280_MODE_GFSK,
       .gfsk = priv->cfg.gfsk.modulation,
     };
     mod_params.gfsk.bandwidth_time = bt;
@@ -3152,23 +3223,19 @@ static ssize_t gfsk_crc_bytes_show(
   struct device_attribute *attr,
   char *buf
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
-  u32 crc_bytes;
-  switch (priv->cfg.gfsk.packet.crc_length) {
-  case SX1280_RADIO_CRC_OFF:
-    crc_bytes = 0;
-    break;
-  case SX1280_RADIO_CRC_1_BYTE:
-    crc_bytes = 1;
-    break;
-  case SX1280_RADIO_CRC_2_BYTES:
-    crc_bytes = 2;
-    break;
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
   }
 
-  return sprintf(buf, "%u\n", crc_bytes);
+  int crc_bytes = sx1280_radio_crc_etoi(priv->cfg.gfsk.packet.crc_length);
+  int count = sprintf(buf, "%d\n", crc_bytes);
+
+  mutex_unlock(&priv->lock);
+  return count;
 }
 
 /**
@@ -3190,32 +3257,23 @@ static ssize_t gfsk_crc_bytes_store(
     return err;
   }
 
-  u8 crc_length;
-  switch (crc_bytes) {
-  case 0:
-    crc_length = SX1280_RADIO_CRC_OFF;
-    break;
-  case 1:
-    crc_length = SX1280_RADIO_CRC_1_BYTE;
-    break;
-  case 2:
-    crc_length = SX1280_RADIO_CRC_2_BYTES;
-    break;
-  default:
-    return -EINVAL;
+  int crc_length = sx1280_radio_crc_itoe(crc_bytes);
+  if (crc_length < 0) {
+    return crc_length;
+  }
+
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, false))) {
+    return err;
   }
 
   if (priv->cfg.mode == SX1280_MODE_GFSK) {
-    if ((err = sx1280_acquire_idle(priv))) {
-      return err;
-    }
-
-    union sx1280_packet_params pkt_params = {
+    struct sx1280_packet_params packet_params = {
+      .mode = SX1280_MODE_GFSK,
       .gfsk = priv->cfg.gfsk.packet,
     };
-    pkt_params.gfsk.crc_length = crc_length;
+    packet_params.gfsk.crc_length = crc_length;
 
-    if ((err = sx1280_set_packet_params(priv, pkt_params))) {
+    if ((err = sx1280_set_packet_params(priv, packet_params))) {
       goto fail;
     }
   }
@@ -3232,10 +3290,18 @@ static ssize_t gfsk_crc_polynomial_show(
   struct device_attribute *attr,
   char *buf
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
-  return sprintf(buf, "%*phN\n", 2, priv->cfg.gfsk.crc_polynomial);
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
+  }
+
+  int count = sprintf(buf, "%*phN\n", 2, priv->cfg.gfsk.crc_polynomial);
+
+  mutex_unlock(&priv->lock);
+  return count;
 }
 
 /**
@@ -3252,7 +3318,7 @@ static ssize_t gfsk_crc_polynomial_store(
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
-  if (count != 5 || count != 4) {
+  if (count != 5 && count != 4) {
     return -EINVAL;
   }
 
@@ -3261,11 +3327,7 @@ static ssize_t gfsk_crc_polynomial_store(
     return err;
   }
 
-  err = priv->cfg.mode == SX1280_MODE_GFSK
-    ? sx1280_acquire_idle(priv)
-    : mutex_lock_interruptible(&priv->lock);
-
-  if (err) {
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, false))) {
     return err;
   }
 
@@ -3291,10 +3353,18 @@ static ssize_t gfsk_crc_seed_show(
   struct device_attribute *attr,
   char *buf
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
-  return sprintf(buf, "%*phN\n", 2, priv->cfg.gfsk.crc_seed);
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
+  }
+
+  int count = sprintf(buf, "%*phN\n", 2, priv->cfg.gfsk.crc_seed);
+
+  mutex_unlock(&priv->lock);
+  return count;
 }
 
 /**
@@ -3311,7 +3381,7 @@ static ssize_t gfsk_crc_seed_store(
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
-  if (count != 5 || count != 4) {
+  if (count != 5 && count != 4) {
     return -EINVAL;
   }
 
@@ -3320,11 +3390,7 @@ static ssize_t gfsk_crc_seed_store(
     return err;
   }
 
-  err = priv->cfg.mode == SX1280_MODE_GFSK
-    ? sx1280_acquire_idle(priv)
-    : mutex_lock_interruptible(&priv->lock);
-
-  if (err) {
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, false))) {
     return err;
   }
 
@@ -3350,11 +3416,19 @@ static ssize_t gfsk_whitening_show(
   struct device_attribute *attr,
   char *buf
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
+  }
+
   bool whitening = priv->cfg.gfsk.packet.whitening == SX1280_WHITENING_ENABLE;
-  return sprintf(buf, "%d\n", whitening);
+  int count = sprintf(buf, "%d\n", whitening);
+
+  mutex_unlock(&priv->lock);
+  return count;
 }
 
 /**
@@ -3371,22 +3445,27 @@ static ssize_t gfsk_whitening_store(
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
   
-  bool whitening;
-  if ((err = kstrtobool(buf, &whitening))) {
+  bool whitening_bool;
+  if ((err = kstrtobool(buf, &whitening_bool))) {
+    return err;
+  }
+
+  enum sx1280_whitening whitening = whitening_bool
+    ? SX1280_WHITENING_ENABLE
+    : SX1280_WHITENING_DISABLE;
+
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, false))) {
     return err;
   }
 
   if (priv->cfg.mode == SX1280_MODE_GFSK) {
-    if ((err = sx1280_acquire_idle(priv))) {
-      return err;
-    }
-
-    union sx1280_packet_params pkt_params = {
+    struct sx1280_packet_params packet_params = {
+      .mode = SX1280_MODE_GFSK,
       .gfsk = priv->cfg.gfsk.packet,
     };
-    pkt_params.gfsk.whitening = whitening;
+    packet_params.gfsk.whitening = whitening;
 
-    if ((err = sx1280_set_packet_params(priv, pkt_params))) {
+    if ((err = sx1280_set_packet_params(priv, packet_params))) {
       goto fail;
     }
   }
@@ -3398,57 +3477,34 @@ fail:
   return err ? err : count;
 }
 
-static ssize_t gfsk_mod_index_show(
+static ssize_t gfsk_modulation_index_show(
   struct device *dev,
   struct device_attribute *attr,
   char *buf
 ) {
+  int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
 
-  switch (priv->cfg.gfsk.modulation.modulation_index) {
-  case SX1280_MOD_IND_0_35:
-    return sprintf(buf, "0.35\n");
-  case SX1280_MOD_IND_0_50:
-    return sprintf(buf, "0.50\n");
-  case SX1280_MOD_IND_0_75:
-    return sprintf(buf, "0.75\n");
-  case SX1280_MOD_IND_1_00:
-    return sprintf(buf, "1.00\n");
-  case SX1280_MOD_IND_1_25:
-    return sprintf(buf, "1.25\n");
-  case SX1280_MOD_IND_1_50:
-    return sprintf(buf, "1.50\n");
-  case SX1280_MOD_IND_1_75:
-    return sprintf(buf, "1.75\n");
-  case SX1280_MOD_IND_2_00:
-    return sprintf(buf, "2.00\n");
-  case SX1280_MOD_IND_2_25:
-    return sprintf(buf, "2.25\n");
-  case SX1280_MOD_IND_2_50:
-    return sprintf(buf, "2.50\n");
-  case SX1280_MOD_IND_2_75:
-    return sprintf(buf, "2.75\n");
-  case SX1280_MOD_IND_3_00:
-    return sprintf(buf, "3.00\n");
-  case SX1280_MOD_IND_3_25:
-    return sprintf(buf, "3.25\n");
-  case SX1280_MOD_IND_3_50:
-    return sprintf(buf, "3.50\n");
-  case SX1280_MOD_IND_3_75:
-    return sprintf(buf, "3.75\n");
-  case SX1280_MOD_IND_4_00:
-    return sprintf(buf, "4.00\n");
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
   }
 
-  return -EINVAL;
+  const char *mod_index = sx1280_modulation_index_etos(
+    priv->cfg.gfsk.modulation.modulation_index
+  );
+
+  int count = sprintf(buf, "%s\n", mod_index);
+
+  mutex_unlock(&priv->lock);
+  return count;
 }
 
 /**
  *
  * @context - process
  */
-static ssize_t gfsk_mod_index_store(
+static ssize_t gfsk_modulation_index_store(
   struct device *dev,
   struct device_attribute *attr,
   const char *buf,
@@ -3495,12 +3551,13 @@ static ssize_t gfsk_mod_index_store(
     return -EINVAL;
   }
 
-  if (priv->cfg.mode == SX1280_MODE_GFSK) {
-    if ((err = sx1280_acquire_idle(priv))) {
-      return err;
-    }
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, false))) {
+    return err;
+  }
 
-    union sx1280_modulation_params mod_params = {
+  if (priv->cfg.mode == SX1280_MODE_GFSK) {
+    struct sx1280_modulation_params mod_params = {
+      .mode = SX1280_MODE_GFSK,
       .gfsk = priv->cfg.gfsk.modulation,
     };
     mod_params.gfsk.modulation_index = mod_index;
@@ -3531,14 +3588,8 @@ static ssize_t gfsk_preamble_bits_show(
   }
 
   int bits = sx1280_preamble_etoi(priv->cfg.gfsk.packet.preamble_length);
-  if (bits < 0) {
-    err = bits;
-    goto fail;
-  }
-
   int count = sprintf(buf, "%d\n", bits);
 
-fail:
   mutex_unlock(&priv->lock);
   return err ? err : count;
 }
@@ -3556,7 +3607,7 @@ static ssize_t gfsk_preamble_bits_store(
   int err;
   struct net_device *netdev = to_net_dev(dev);
   struct sx1280_priv *priv = netdev_priv(netdev);
-  
+
   int preamble_bits;
   if ((err = kstrtoint(buf, 10, &preamble_bits))) {
     return err;
@@ -3567,22 +3618,192 @@ static ssize_t gfsk_preamble_bits_store(
     return preamble_enum;
   }
 
-  if (priv->cfg.mode == SX1280_MODE_GFSK) {
-    if ((err = sx1280_acquire_idle(priv))) {
-      return err;
-    }
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, false))) {
+    return err;
+  }
 
-    union sx1280_packet_params pkt_params = {
+  if (priv->cfg.mode == SX1280_MODE_GFSK) {
+    struct sx1280_packet_params packet_params = {
+      .mode = SX1280_MODE_GFSK,
       .gfsk = priv->cfg.gfsk.packet,
     };
-    pkt_params.gfsk.preamble_length = preamble_enum;
+    packet_params.gfsk.preamble_length = preamble_enum;
 
-    if ((err = sx1280_set_packet_params(priv, pkt_params))) {
+    if ((err = sx1280_set_packet_params(priv, packet_params))) {
       goto fail;
     }
   }
 
   priv->cfg.gfsk.packet.preamble_length = preamble_enum;
+
+fail:
+  mutex_unlock(&priv->lock);
+  return err ? err : count;
+}
+
+static ssize_t gfsk_sync_word_length_show(
+  struct device *dev,
+  struct device_attribute *attr,
+  char *buf
+) {
+  int err;
+  struct net_device *netdev = to_net_dev(dev);
+  struct sx1280_priv *priv = netdev_priv(netdev);
+
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
+  }
+
+  int bytes;
+  switch (priv->cfg.gfsk.packet.sync_word_length) {
+  case SX1280_SYNC_WORD_LEN_1_B: bytes = 1; break;
+  case SX1280_SYNC_WORD_LEN_2_B: bytes = 2; break;
+  case SX1280_SYNC_WORD_LEN_3_B: bytes = 3; break;
+  case SX1280_SYNC_WORD_LEN_4_B: bytes = 4; break;
+  case SX1280_SYNC_WORD_LEN_5_B: bytes = 5; break;
+  }
+
+  int count = sprintf(buf, "%d\n", bytes);
+
+  mutex_unlock(&priv->lock);
+  return err ? err : count;
+}
+
+/**
+ *
+ * @context - process
+ */
+static ssize_t gfsk_sync_word_length_store(
+  struct device *dev,
+  struct device_attribute *attr,
+  const char *buf,
+  size_t count
+) {
+  int err;
+  struct net_device *netdev = to_net_dev(dev);
+  struct sx1280_priv *priv = netdev_priv(netdev);
+
+  int sync_word_bytes;
+  if ((err = kstrtoint(buf, 10, &sync_word_bytes))) {
+    return err;
+  }
+
+  enum sx1280_gfsk_sync_word_length sync_word_length;
+  switch (sync_word_bytes) {
+  case 1: sync_word_length = SX1280_SYNC_WORD_LEN_1_B; break;
+  case 2: sync_word_length = SX1280_SYNC_WORD_LEN_2_B; break;
+  case 3: sync_word_length = SX1280_SYNC_WORD_LEN_3_B; break;
+  case 4: sync_word_length = SX1280_SYNC_WORD_LEN_4_B; break;
+  case 5: sync_word_length = SX1280_SYNC_WORD_LEN_5_B; break;
+  default: return -EINVAL;
+  }
+
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, false))) {
+    return err;
+  }
+
+  if (priv->cfg.mode == SX1280_MODE_GFSK) {
+    struct sx1280_packet_params packet_params = {
+      .mode = SX1280_MODE_GFSK,
+      .gfsk = priv->cfg.gfsk.packet,
+    };
+    packet_params.gfsk.sync_word_length = sync_word_length;
+
+    if ((err = sx1280_set_packet_params(priv, packet_params))) {
+      goto fail;
+    }
+  }
+
+  priv->cfg.gfsk.packet.sync_word_length = sync_word_length;
+
+fail:
+  mutex_unlock(&priv->lock);
+  return err ? err : count;
+}
+
+static ssize_t gfsk_sync_word_match_show(
+  struct device *dev,
+  struct device_attribute *attr,
+  char *buf
+) {
+  int err;
+  struct net_device *netdev = to_net_dev(dev);
+  struct sx1280_priv *priv = netdev_priv(netdev);
+
+  if ((err = mutex_lock_interruptible(&priv->lock))) {
+    return err;
+  }
+
+  const char *mask;
+  switch (priv->cfg.gfsk.packet.sync_word_match) {
+  case SX1280_RADIO_SELECT_SYNCWORD_OFF  : mask = "000"; break;
+  case SX1280_RADIO_SELECT_SYNCWORD_1    : mask = "100"; break;
+  case SX1280_RADIO_SELECT_SYNCWORD_2    : mask = "010"; break;
+  case SX1280_RADIO_SELECT_SYNCWORD_1_2  : mask = "110"; break;
+  case SX1280_RADIO_SELECT_SYNCWORD_3    : mask = "001"; break;
+  case SX1280_RADIO_SELECT_SYNCWORD_1_3  : mask = "101"; break;
+  case SX1280_RADIO_SELECT_SYNCWORD_2_3  : mask = "011"; break;
+  case SX1280_RADIO_SELECT_SYNCWORD_1_2_3: mask = "111"; break;
+  }
+
+  int count = sprintf(buf, "%s\n", mask);
+
+  mutex_unlock(&priv->lock);
+  return err ? err : count;
+}
+
+/**
+ *
+ * @context - process
+ */
+static ssize_t gfsk_sync_word_match_store(
+  struct device *dev,
+  struct device_attribute *attr,
+  const char *buf,
+  size_t count
+) {
+  int err;
+  struct net_device *netdev = to_net_dev(dev);
+  struct sx1280_priv *priv = netdev_priv(netdev);
+
+  enum sx1280_sync_word_match sync_word_match;
+  if (sysfs_streq(buf, "000") || sysfs_streq(buf, "off")) {
+    sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_OFF;
+  } else if (sysfs_streq(buf, "100")) {
+    sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_1;
+  } else if (sysfs_streq(buf, "010")) {
+    sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_2;
+  } else if (sysfs_streq(buf, "110")) {
+    sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_1_2;
+  } else if (sysfs_streq(buf, "001")) {
+    sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_3;
+  } else if (sysfs_streq(buf, "101")) {
+    sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_1_3;
+  } else if (sysfs_streq(buf, "011")) {
+    sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_2_3;
+  } else if (sysfs_streq(buf, "111")) {
+    sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_1_2_3;
+  } else {
+    return -EINVAL;
+  }
+
+  if ((err = sx1280_acquire_idle_if_mode(priv, SX1280_MODE_GFSK, false))) {
+    return err;
+  }
+
+  if (priv->cfg.mode == SX1280_MODE_GFSK) {
+    struct sx1280_packet_params packet_params = {
+      .mode = SX1280_MODE_GFSK,
+      .gfsk = priv->cfg.gfsk.packet,
+    };
+    packet_params.gfsk.sync_word_match = sync_word_match;
+
+    if ((err = sx1280_set_packet_params(priv, packet_params))) {
+      goto fail;
+    }
+  }
+
+  priv->cfg.gfsk.packet.sync_word_match = sync_word_match;
 
 fail:
   mutex_unlock(&priv->lock);
@@ -3602,10 +3823,14 @@ static struct device_attribute dev_attr_gfsk_crc_polynomial =
   __ATTR(crc_polynomial, 0644, gfsk_crc_polynomial_show, gfsk_crc_polynomial_store);
 static struct device_attribute dev_attr_gfsk_crc_seed =
   __ATTR(crc_seed, 0644, gfsk_crc_seed_show, gfsk_crc_seed_store);
-static struct device_attribute dev_attr_gfsk_mod_index =
-  __ATTR(mod_index, 0644, gfsk_mod_index_show, gfsk_mod_index_store);
+static struct device_attribute dev_attr_gfsk_modulation_index =
+  __ATTR(modulation_index, 0644, gfsk_modulation_index_show, gfsk_modulation_index_store);
 static struct device_attribute dev_attr_gfsk_preamble_bits =
   __ATTR(preamble_bits, 0644, gfsk_preamble_bits_show, gfsk_preamble_bits_store);
+static struct device_attribute dev_attr_gfsk_sync_word_length =
+  __ATTR(sync_word_length, 0644, gfsk_sync_word_length_show, gfsk_sync_word_length_store);
+static struct device_attribute dev_attr_gfsk_sync_word_match =
+  __ATTR(sync_word_match, 0644, gfsk_sync_word_match_show, gfsk_sync_word_match_store);
 static struct device_attribute dev_attr_gfsk_whitening =
   __ATTR(whitening, 0644, gfsk_whitening_show, gfsk_whitening_store);
 
@@ -3625,8 +3850,10 @@ static struct attribute *sx1280_gfsk_attrs[] = {
   &dev_attr_gfsk_crc_bytes.attr,
   &dev_attr_gfsk_crc_polynomial.attr,
   &dev_attr_gfsk_crc_seed.attr,
-  &dev_attr_gfsk_mod_index.attr,
+  &dev_attr_gfsk_modulation_index.attr,
   &dev_attr_gfsk_preamble_bits.attr,
+  &dev_attr_gfsk_sync_word_length.attr,
+  &dev_attr_gfsk_sync_word_match.attr,
   &dev_attr_gfsk_whitening.attr,
   NULL,
 };
