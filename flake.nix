@@ -6,13 +6,8 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
   };
 
-  outputs = { self, flake-utils, nixpkgs }:
-  let
-    # Only aarch64-linux devices are supported by this driver.
-    system = "aarch64-linux";
-    pkgs = import nixpkgs { inherit system; };
-
-    mkModule = kernel:
+  outputs = { self, flake-utils, nixpkgs }: {
+    mkModule = pkgs: kernel:
       let
         buildDir = "${kernel.dev}/lib/modules/${kernel.modDirVersion}/build";
         outDir = "$out/lib/modules/${kernel.modDirVersion}/kernel/drivers/net/wireless";
@@ -30,7 +25,7 @@
 
         makeFlags = [
           "KERNELDIR=${buildDir}"
-          "INSTALL_MOD_PATH=$(out)"
+          "INSTALL_MOD_PATH=$out"
           "ARCH=${pkgs.stdenv.hostPlatform.linuxArch}"
         ];
 
@@ -49,9 +44,6 @@
           platforms = platforms.linux;
         };
       };
-  in
-  {
-    ${system}.mkModule = mkModule;
 
     nixosModules.default = { config, lib, pkgs, ... }:
       let
@@ -59,11 +51,11 @@
 
         cfg = config.hardware.sx1280;
         kernel = config.boot.kernelPackages.kernel;
-        kModule = self.${pkgs.stdenv.hostPlatform.system}.mkModule kernel;
+        kModule = self.mkModule pkgs kernel;
       in
       {
         options.hardware.sx1280 = {
-          enable = mkEnableOption 
+          enable = mkEnableOption
             "Whether to enable the SX1280 Linux kernel driver";
 
           dtso = mkOption {
@@ -414,8 +406,6 @@
           '';
         };
       };
-
-    packages.${system}.default = mkModule pkgs.linuxPackages.kernel;
   } // flake-utils.lib.eachDefaultSystem (system:
     let
       pkgs = import nixpkgs { inherit system; };
@@ -468,6 +458,8 @@
           EOF
         '';
       };
+
+      packages.default = self.mkModule pkgs pkgs.linuxPackages.kernel;
     }
   );
 }
