@@ -4537,7 +4537,7 @@ static int sx1280_probe(struct spi_device *spi) {
    */
   if ((err = sx1280_setup_gpios(priv))) {
     dev_err(&spi->dev, "failed to configure GPIOs\n");
-    goto error_free;
+    goto error_free_netdev;
   }
 
   /* Define SPI settings according to SX1280 datasheet. */
@@ -4549,19 +4549,19 @@ static int sx1280_probe(struct spi_device *spi) {
   /* Apply the SPI settings above and handle errors. */
   if ((err = spi_setup(spi))) {
     dev_err(&spi->dev, "failed to apply SPI settings\n");
-    goto error_free;
+    goto error_free_netdev;
   }
 
   if ((err = sx1280_setup(priv))) {
     dev_err(&spi->dev, "failed to set up the SX1280.\n");
-    goto error_free;
+    goto error_free_netdev;
   }
 
   /* Map all IRQs to the in-use DIO. */
   u16 irq_mask[3] = { 0 };
   irq_mask[priv->dio_index - 1] = 0xFFFF;
   if ((err = sx1280_set_dio_irq_params(priv, 0xFFFF, irq_mask))) {
-    goto error_free;
+    goto error_free_netdev;
   }
 
   netdev_dbg(netdev, "configured DIO%d as IRQ", priv->dio_index);
@@ -4583,7 +4583,7 @@ static int sx1280_probe(struct spi_device *spi) {
    */
   if ((err = register_netdev(netdev))) {
     dev_err(&spi->dev, "failed to register net device\n");
-    goto error_wq;
+    goto error_unlock;
   }
 
   dev_info(
@@ -4594,7 +4594,7 @@ static int sx1280_probe(struct spi_device *spi) {
 
   if ((err = sysfs_create_groups(&netdev->dev.kobj, sx1280_groups))) {
     netdev_err(netdev, "failed to create sysfs entries\n");
-    goto error_free;
+    goto error_unregister;
   }
 
   /*
@@ -4620,15 +4620,15 @@ static int sx1280_probe(struct spi_device *spi) {
   dev_dbg(&spi->dev, "%s is listening for packets\n", netdev->name);
   return 0;
 
-  /* TODO: fix ordering */
 error_groups:
   sysfs_remove_groups(&netdev->dev.kobj, sx1280_groups);
-error_free:
+error_unregister:
   unregister_netdev(netdev);
-  free_netdev(netdev);
-error_wq:
-  destroy_workqueue(priv->xmit_queue);
+error_unlock:
   mutex_unlock(&priv->lock);
+  destroy_workqueue(priv->xmit_queue);
+error_free:
+  free_netdev(netdev);
   return err;
 }
 
@@ -4639,15 +4639,18 @@ static void sx1280_remove(struct spi_device *spi) {
 
   mutex_lock(&priv->lock);
 
+  if (priv->initialized) {
 #ifdef DEBUG
-  cancel_delayed_work_sync(&priv->status_check);
+    cancel_delayed_work_sync(&priv->status_check);
 #endif
 
-  sysfs_remove_groups(&priv->netdev->dev.kobj, sx1280_groups);
-  cancel_work_sync(&priv->tx_work);
-  destroy_workqueue(priv->xmit_queue);
-  unregister_netdev(priv->netdev);
-  free_netdev(priv->netdev);
+    sysfs_remove_groups(&priv->netdev->dev.kobj, sx1280_groups);
+    cancel_work_sync(&priv->tx_work);
+    destroy_workqueue(priv->xmit_queue);
+    unregister_netdev(priv->netdev);
+    free_netdev(priv->netdev);
+  }
+
   mutex_unlock(&priv->lock);
 }
 
