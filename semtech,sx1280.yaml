@@ -15,225 +15,31 @@ properties:
     type: integer
     maxItems: 1
 
+  spi-max-frequency:
+    type: integer
+
   busy-gpios:
     type: phandle-array
     maxItems: 1
 
-  dio-gpios:
+  dio1-gpios:
     type: phandle-array
-    maxItems: 3
-    minItems: 3
+    maxItems: 1
 
-  mode:
-    description: |
-      The default packet mode of the transceiver.
-    type: string
-    enum: ["ble", "flrc", "gfsk", "lora"]
+  dio2-gpios:
+    type: phandle-array
+    maxItems: 1
 
-  rf-freq-hz:
-    description: |
-      The frequency, in Hertz, around which the transceiver will operate.
-    type: integer
+  dio3-gpios:
+    type: phandle-array
+    maxItems: 1
 
-  startup-timeout-us:
-    description: |
-      The number of microseconds which the SX1280 is permitted to take when
-      commanded into reset mode to pull its busy signal low before failure.
-    type: integer
-    maximum: 1000000
-    minimum: 0
-
-  timeout-us:
-    type: integer
-    maximum: 262143999
-    minimum: 0
-
-  power-dbm:
-    type: integer
-    maximum: 13
-    minimum: -18
-
-  ramp-time-us:
-    type: integer
-    enum: [2, 4, 6, 8, 10, 12, 16, 20]
-
-  gfsk:
-    type: object
-    description: GFSK configuration
-    properties:
-      bitrate-kbs:
-        type: integer
-        enum: [2000, 1600, 1000, 800, 500, 400, 250, 125]
-
-      bandwidth-khz:
-        type: integer
-        enum: [2400, 1200, 600, 300]
-
-      modulation-index:
-        type: integer
-        enum:
-          - 35
-          - 50
-          - 75
-          - 100
-          - 125
-          - 150
-          - 175
-          - 200
-          - 225
-          - 250
-          - 275
-          - 300
-          - 325
-          - 350
-          - 375
-          - 400
-
-      bt:
-        enum: ["off", "1.0", "0.5"]
-
-      preamble-bits:
-        type: integer
-        enum: [4, 8, 12, 16, 20, 24, 28, 32]
-
-      sync-word-bytes:
-        type: integer
-        minimum: 1
-        maximum: 5
-
-      sync-word-match:
-        type: array
-        items:
-          - enum: [0, 1]
-          - enum: [0, 1]
-          - enum: [0, 1]
-
-      fixed-length:
-        type: boolean
-
-      max-payload-bytes:
-        type: integer
-        minimum: 1
-        maximum: 255
-
-      crc-bytes:
-        type: integer
-        minimum: 0
-        maximum: 2
-
-      disable-whitening:
-        type: boolean
-
-      sync-words:
-        type: array
-        items:
-          type: integer
-          maximum: 1099511627775
-          minimum: 0
-
-      crc-seed:
-        type: integer
-        maximum: 65535
-        minimum: 0
-
-      crc-polynomial:
-        type: integer
-        maximum: 65535
-        minimum: 0
-
-  flrc:
-    bitrate-kbs:
-      type: integer
-      enum: [1300, 1000, 650, 520, 325, 260]
-
-    # bandwidth-khz is not an option because it is fully determined by bitrate.
-
-    coding-rate:
-      enum: ["1/2", "3/4", "1/1"]
-
-    bt:
-      enum: ["off", "1.0", "0.5"]
-
-    preamble-bits:
-      type: integer
-      enum: [8, 12, 16, 20, 24, 28, 32]
-
-    sync-word-match:
-      type: array
-      items:
-        - enum: [0, 1]
-        - enum: [0, 1]
-        - enum: [0, 1]
-
-    fixed-length:
-      type: boolean
-
-    max-payload-bytes:
-      type: integer
-      maximum: 127
-      minimum: 6
-
-    crc-bytes:
-      type: integer
-      enum: [0, 2, 3, 4]
-
-    crc-seed:
-      type: integer
-      maximum: 65535
-      minimum: 0
-
-    disable-whitening:
-      type: boolean
-
-    sync-words:
-      type: array
-      items:
-        type: integer
-        maximum: 1099511627775
-        minimum: 0
-      maxItems: 3
-      minItems: 0
-
-  lora:
-    type: object
-    description: LoRa configuration
-    properties:
-      spreading-factor:
-        type: integer
-        maximum: 12
-        minimum: 5
-
-      bandwidth-khz:
-        type: integer
-        enum: [1600, 800, 400, 200]
-
-      coding-rate:
-        enum: ["4/5", "4/6", "4/7", "4/8"]
-
-      disable-long-interleaving:
-        type: boolean
-
-      preamble-bits:
-        type: integer
-        minimum: 1
-        maximum: 491520
-
-      implicit-header:
-        type: boolean;
-
-      max-payload-bytes:
-        type: integer
-        minimum: 1
-        maximum: 255
-
-      disable-crc:
-        type: boolean
-
-      invert-iq:
-        type: boolean
+  reset-gpios:
+    type: phandle-array
+    maxItems: 1
 
 required:
   - compatible
   - reg
-
-
+  - busy-gpios
+  - reset-gpios

@@ -1993,23 +1993,22 @@ static int sx1280_setup_gpios(struct sx1280_priv *priv) {
       return PTR_ERR(priv->busy);
     }
 
-    for (int i = 0; i < 3; i++) {
-      struct gpio_desc *dio = devm_gpiod_get_index(dev, "dio", i, GPIOD_IN);
+    const char *dio_names[] = { "dio1", "dio2", "dio3" };
+    for (int i = 0; i < ARRAY_SIZE(dio_names); i++) {
+      struct gpio_desc *dio =
+        devm_gpiod_get_optional(dev, dio_names[i], GPIOD_IN);
 
       if (IS_ERR(dio)) {
-        err = PTR_ERR(dio);
-
-        if (err == -ENOENT) {
-          dev_warn(dev, "Optional DIO%d not specified.\n", i + 1);
-        } else {
-          dev_err(dev, "Failed to configure GPIO for DIO%d.\n", i + 1);
-          return err;
-        }
-      } else {
-        priv->dio_index = i + 1;
-        priv->dio = dio;
-        break;
+        dev_err(dev, "Failed to configure GPIO for DIO%d.\n", i + 1);
+        return PTR_ERR(dio);
+      } else if (!dio) {
+        dev_dbg(dev, "Optional DIO%d not specified.\n", i + 1);
+        continue;
       }
+
+      priv->dio_index = i + 1;
+      priv->dio = dio;
+      break;
     }
 
     priv->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
@@ -4538,7 +4537,7 @@ static int sx1280_probe(struct spi_device *spi) {
    */
   if ((err = sx1280_setup_gpios(priv))) {
     dev_err(&spi->dev, "failed to configure GPIOs\n");
-    goto error_free_netdev;
+    goto error_free;
   }
 
   /* Define SPI settings according to SX1280 datasheet. */
