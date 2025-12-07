@@ -2212,6 +2212,7 @@ static int sx1280_setup(struct sx1280_priv *priv) {
     ) || (err = sx1280_set_tx_params(priv, cfg->power, cfg->ramp_time))
     || (err = sx1280_set_auto_fs(priv, true))
   ) {
+    dev_err(&spi->dev, "setup failed: %d\n", err);
     return err;
   }
 
@@ -4547,21 +4548,14 @@ static int sx1280_probe(struct spi_device *spi) {
   spi->mode = 0;                 /* CPOL = 0, CPHA = 0 */
 
   /* Apply the SPI settings above and handle errors. */
-  if ((err = spi_setup(spi))) {
-    dev_err(&spi->dev, "failed to apply SPI settings\n");
-    goto error_free_netdev;
-  }
-
-  if ((err = sx1280_setup(priv))) {
-    dev_err(&spi->dev, "failed to set up the SX1280.\n");
-    goto error_free_netdev;
-  }
-
-  /* Map all IRQs to the in-use DIO. */
   u16 irq_mask[3] = { 0 };
   irq_mask[priv->dio_index - 1] = 0xFFFF;
-  if ((err = sx1280_set_dio_irq_params(priv, 0xFFFF, irq_mask))) {
-    goto error_free_netdev;
+  if (
+    (err = spi_setup(spi))
+    || (err = sx1280_setup(priv))
+    || (err = sx1280_set_dio_irq_params(priv, 0xFFFF, irq_mask))
+  ) {
+    goto error_free;
   }
 
   netdev_dbg(netdev, "configured DIO%d as IRQ", priv->dio_index);
