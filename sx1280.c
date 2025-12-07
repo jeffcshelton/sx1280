@@ -539,7 +539,6 @@ struct sx1280_platform_data {
  * form.
  *
  * @mode - The packet type of the transceiver: GFSK, FLRC, LoRa, or Ranging.
- * TODO
  */
 struct sx1280_config {
   enum sx1280_mode mode;
@@ -562,12 +561,12 @@ static const struct sx1280_config sx1280_default_config = {
   .period_base = SX1280_PERIOD_BASE_1_MS,
   .period_base_count = 1000,
   .power = 18, /* 0 dBm */
-  .ramp_time = SX1280_RADIO_RAMP_08_US,
+  .ramp_time = SX1280_RADIO_RAMP_20_US,
   .freq = SX1280_FREQ_HZ_TO_PLL(2400000000), /* 2.4 GHz */
   .crc_seed = { 0xFF, 0xFF },
   .sync_words = {
-    { 0x12, 0xAD, 0x34, 0xCD, 0x56 },
     { 0xD3, 0x91, 0xD3, 0x91, 0xD3 },
+    { 0x12, 0xAD, 0x34, 0xCD, 0x56 },
     { 0xAA, 0xF0, 0x05, 0x3C, 0x81 },
   },
   .flrc = {
@@ -577,7 +576,7 @@ static const struct sx1280_config sx1280_default_config = {
       .coding_rate = SX1280_FLRC_CR_3_4,
     },
     .packet = {
-      .agc_preamble_length = SX1280_PREAMBLE_LENGTH_08_BITS,
+      .agc_preamble_length = SX1280_PREAMBLE_LENGTH_32_BITS,
       .crc_length = SX1280_FLRC_CRC_2_BYTE,
       .packet_type = SX1280_RADIO_PACKET_VARIABLE_LENGTH,
       .payload_length = SX1280_FLRC_PAYLOAD_LENGTH_MAX,
@@ -589,7 +588,7 @@ static const struct sx1280_config sx1280_default_config = {
   .gfsk = {
     .crc_polynomial = { 0x10, 0x21 },
     .modulation = {
-      .bandwidth_time = SX1280_BT_0_5,
+      .bandwidth_time = SX1280_BT_1_0,
       .bitrate_bandwidth = SX1280_FSK_BR_2_000_BW_2_4,
       .modulation_index = SX1280_MOD_IND_0_50,
     },
@@ -597,8 +596,8 @@ static const struct sx1280_config sx1280_default_config = {
       .crc_length = SX1280_RADIO_CRC_2_BYTES,
       .packet_type = SX1280_RADIO_PACKET_VARIABLE_LENGTH,
       .payload_length = SX1280_GFSK_PAYLOAD_LENGTH_MAX,
-      .preamble_length = SX1280_PREAMBLE_LENGTH_08_BITS,
-      .sync_word_length = SX1280_SYNC_WORD_LEN_4_B,
+      .preamble_length = SX1280_PREAMBLE_LENGTH_32_BITS,
+      .sync_word_length = SX1280_SYNC_WORD_LEN_5_B,
       .sync_word_match = SX1280_RADIO_SELECT_SYNCWORD_1,
       .whitening = SX1280_WHITENING_ENABLE,
     },
@@ -620,7 +619,15 @@ static const struct sx1280_config sx1280_default_config = {
   .ranging = {},
 };
 
-#define SX1280_BUSY_TIMEOUT_US 100000
+#define SX1280_BUSY_TIMEOUT_US 500000
+
+enum sx1280_state {
+  SX1280_STATE_SLEEP,
+  SX1280_STATE_STANDBY,
+  SX1280_STATE_FS,
+  SX1280_STATE_TX,
+  SX1280_STATE_RX,
+};
 
 /* The private, internal structure for the SX1280 driver. */
 struct sx1280_priv {
@@ -655,13 +662,15 @@ struct sx1280_priv {
   struct mutex lock;
 
   /*
-   * Whether the chip is idle, meaning that it is not currently performing an
-   * operation that must not be interrupted, such as transmitting a packet.
-   *
-   * This is different than just waiting for the BUSY pin to be pulled low,
-   * which is required before every SPI transaction with the chip.
+   * Spinlock that protects all atomic, Tx-related operations spawned from xmit.
    */
-  bool idle;
+  struct spinlock tx_lock;
+
+  /*
+   * The current operational mode state of the chip, used to determine what is
+   * currently going on within the chip and what actions are legal to take.
+   */
+  enum sx1280_state state;
 
   /*
    * Wait queue for all operations that require the chip to be idle, such as
@@ -730,7 +739,7 @@ static int sx1280_transfer(
   if (
     (err = sx1280_wait_busy(priv))
     || (err = spi_sync_transfer(priv->spi, xfers, num_xfers))
-    || (sx1280_wait_busy(priv)) /* TODO: consider removing */
+    || (err = sx1280_wait_busy(priv))
   ) {
     return err;
   }
@@ -744,11 +753,15 @@ static int sx1280_write(
   size_t len
 ) {
   int err;
-  if (!(err = sx1280_wait_busy(priv))) {
-    err = spi_write(priv->spi, buf, len);
+  if (
+    (err = sx1280_wait_busy(priv))
+    || (err = spi_write(priv->spi, buf, len))
+    || (err = sx1280_wait_busy(priv))
+  ) {
+    return err;
   }
 
-  return err;
+  return 0;
 }
 
 /**
@@ -1247,9 +1260,7 @@ static int sx1280_set_packet_params(
   struct sx1280_packet_params params
 ) {
   int err;
-  u8 tx[8] = {
-    SX1280_CMD_SET_PACKET_PARAMS
-  };
+  u8 tx[8] = { SX1280_CMD_SET_PACKET_PARAMS };
 
   switch (params.mode) {
   case SX1280_MODE_FLRC:
@@ -1282,7 +1293,7 @@ static int sx1280_set_packet_params(
     return -EINVAL;
   }
 
-  if ((err = sx1280_write(priv, tx, ARRAY_SIZE(tx)))) {
+  if ((err = sx1280_write(priv, tx, sizeof(tx)))) {
     dev_err(&priv->spi->dev, "SetPacketParams: %d\n", err);
     return err;
   }
@@ -1490,24 +1501,14 @@ static int sx1280_stop(struct net_device *netdev) {
  */
 static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *netdev) {
   struct sx1280_priv *priv = netdev_priv(netdev);
-
-  /*
-   * Since the netdev is configured as an Ethernet device, the SKB is guaranteed
-   * to be wrapped with an Ethernet header.
-   */
-  struct ethhdr *ethh = (struct ethhdr *) skb->data;
-  u16 protocol = ntohs(ethh->h_proto);
+  u16 protocol = ntohs(skb->protocol);
 
   /* Log information about the packet for debugging. */
   netdev_dbg(netdev, "xmit: proto=0x%04x, len=%d\n", protocol, skb->len);
-  netdev_dbg(netdev, "  mac: src=%pM, dst=%pM\n", ethh->h_source, ethh->h_dest);
 
-  void *body = skb->data + sizeof(struct ethhdr);
-
-  /* If the protocol is a */
   switch (protocol) {
   case ETH_P_IP:;
-    struct iphdr *iph = (struct iphdr *) body;
+    struct iphdr *iph = (struct iphdr *) skb->data;
     netdev_dbg(
       netdev,
       "  ipv4: src=%pI4, dst=%pI4\n",
@@ -1517,22 +1518,12 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *netdev) {
 
     break;
   case ETH_P_IPV6:;
-    struct ipv6hdr *ip6h = (struct ipv6hdr *) body;
+    struct ipv6hdr *ip6h = (struct ipv6hdr *) skb->data;
     netdev_dbg(
       netdev,
       "  ipv6: src=%pI6c, dst=%pI6c\n",
       &ip6h->saddr,
       &ip6h->daddr
-    );
-
-    break;
-  case ETH_P_ARP:;
-    struct arphdr *arph = (struct arphdr *) body;
-    netdev_dbg(
-      netdev,
-      "  arp: proto=0x%04x, op=%u\n",
-      ntohs(arph->ar_pro),
-      ntohs(arph->ar_op)
     );
 
     break;
@@ -1548,6 +1539,7 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *netdev) {
    * to call `sx1280_xmit` once again.
    */
   netif_stop_queue(netdev);
+  spin_lock(&priv->tx_lock);
 
   /*
    * Check if there is already a packet being transmitted.
@@ -1565,55 +1557,63 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *netdev) {
   /* Queue the work so that it can be performed in a non-atomic context. */
   priv->tx_skb = skb;
   queue_work(priv->xmit_queue, &priv->tx_work);
+
+  spin_unlock(&priv->tx_lock);
   return NETDEV_TX_OK;
 }
 
 static void sx1280_tx_work(struct work_struct *work) {
+  int err;
   struct sx1280_priv *priv = container_of(work, struct sx1280_priv, tx_work);
   struct net_device *netdev = priv->netdev;
+
+  mutex_lock(&priv->lock);
+  spin_lock(&priv->tx_lock);
   struct sk_buff *skb = priv->tx_skb;
+  spin_unlock(&priv->tx_lock);
 
   if (!skb) {
     netdev_warn(netdev, "transmission queued without packet skb\n");
-    return;
+    goto quit;
   }
-
-  mutex_lock(&priv->lock);
 
   struct sx1280_packet_params params = { .mode = priv->cfg.mode };
   switch (params.mode) {
   case SX1280_MODE_FLRC:
-    params.flrc = priv->cfg.flrc.packet;
-
     /* TODO: Pad FLRC packets less than 6 bytes. */
-    if (skb->len < 6 || skb->len > 127) {
+    if (
+      skb->len < SX1280_FLRC_PAYLOAD_LENGTH_MIN
+      || skb->len > SX1280_FLRC_PAYLOAD_LENGTH_MAX
+    ) {
       netdev_warn(netdev, "invalid FLRC packet size: %d bytes\n", skb->len);
       goto drop;
     }
 
-    params.flrc.payload_length = skb->len;
+    priv->cfg.flrc.packet.payload_length = skb->len;
+    params.flrc = priv->cfg.flrc.packet;
     break;
   case SX1280_MODE_GFSK:
-    params.gfsk = priv->cfg.gfsk.packet;
-
-    if (skb->len > 255) {
+    if (skb->len > SX1280_GFSK_PAYLOAD_LENGTH_MAX) {
       netdev_warn(netdev, "invalid GFSK packet size: %d bytes\n", skb->len);
       goto drop;
     }
 
-    params.gfsk.payload_length = skb->len;
+    priv->cfg.gfsk.packet.payload_length = skb->len;
+    params.gfsk = priv->cfg.gfsk.packet;
     break;
   case SX1280_MODE_LORA:
-    params.lora = priv->cfg.lora.packet;
-
-    if (skb->len < 1 || skb->len > 255) {
+    if (
+      skb->len < SX1280_LORA_PAYLOAD_LENGTH_MIN
+      || skb->len > SX1280_LORA_PAYLOAD_LENGTH_MAX
+    ) {
       netdev_warn(netdev, "invalid LoRa packet size: %d bytes\n", skb->len);
       goto drop;
     }
 
-    params.lora.payload_length = skb->len;
+    priv->cfg.lora.packet.payload_length = skb->len;
+    params.lora = priv->cfg.lora.packet;
     break;
-  case SX1280_MODE_RANGING:
+  default:
     /* Packets can't be sent in ranging mode. */
     netdev_warn(netdev, "packet transmission requested in ranging mode\n");
     goto drop;
@@ -1623,24 +1623,31 @@ static void sx1280_tx_work(struct work_struct *work) {
 
   /* Write packet data and packet parameters onto the chip. */
   if (
-    sx1280_set_standby(priv, SX1280_STDBY_RC) /* TODO: remove if not necessary */
-    || sx1280_write_buffer(priv, 0x00, skb->data, skb->len)
-    || sx1280_set_packet_params(priv, params)
-    || sx1280_set_tx(priv, priv->cfg.period_base, priv->cfg.period_base_count)
+    (err = sx1280_set_packet_params(priv, params))
+    || (err = sx1280_write_buffer(priv, 0x00, skb->data, skb->len))
+    || (err = sx1280_set_tx(priv, priv->cfg.period_base, priv->cfg.period_base_count))
   ) {
     goto drop;
   }
 
-  priv->idle = false;
+  priv->state = SX1280_STATE_TX;
   mutex_unlock(&priv->lock);
   return;
 
 drop:
-  netdev->stats.tx_dropped++;
+  /* Free the SKB. */
+  spin_lock(&priv->tx_lock);
   dev_kfree_skb(skb);
+  priv->tx_skb = NULL;
+  spin_unlock(&priv->tx_lock);
+
+  /* Register the packet as dropped. */
+  netdev->stats.tx_dropped++;
+
+quit:
   mutex_unlock(&priv->lock);
-  netif_start_queue(priv->netdev);
-  netdev_err(netdev, "dropped invalid tx packet\n");
+  netif_wake_queue(priv->netdev);
+  netdev_warn(netdev, "dropped invalid tx packet: %d\n", err);
 }
 
 #ifdef DEBUG
@@ -1673,6 +1680,11 @@ static void sx1280_check_status(struct work_struct *work) {
   sx1280_get_rssi_inst(priv, &rssi_inst);
   sx1280_get_irq_status(priv, &irq_status);
 
+  u8 payload_len;
+  u8 preamble_settings;
+  sx1280_read_register(priv, SX1280_REG_PAYLOAD_LENGTH, &payload_len, 1);
+  sx1280_read_register(priv, SX1280_REG_PACKET_PREAMBLE_SETTINGS, &preamble_settings, 1);
+
   dev_dbg(&spi->dev, "status check:\n");
   dev_dbg(&spi->dev, "  status=0x%02x\n", status);
   dev_dbg(&spi->dev, "  mode=%u\n", packet_type);
@@ -1680,6 +1692,8 @@ static void sx1280_check_status(struct work_struct *work) {
   dev_dbg(&spi->dev, "  pkt_status=%*ph\n", 5, packet_status.raw);
   dev_dbg(&spi->dev, "  rssi_inst=%u\n", rssi_inst);
   dev_dbg(&spi->dev, "  irq=0x%04x\n", irq_status);
+  dev_dbg(&spi->dev, "  payload_len=%u\n", payload_len);
+  dev_dbg(&spi->dev, "  preamble_settings=0x%02x\n", preamble_settings);
 
   ktime_t end = ktime_get();
   s64 time = ktime_to_us(ktime_sub(end, start));
@@ -1701,16 +1715,16 @@ static int sx1280_listen(struct sx1280_priv *priv) {
   struct sx1280_packet_params packet_params = { .mode = priv->cfg.mode };
   switch (packet_params.mode) {
   case SX1280_MODE_FLRC:
+    priv->cfg.flrc.packet.payload_length = SX1280_FLRC_PAYLOAD_LENGTH_MAX;
     packet_params.flrc = priv->cfg.flrc.packet;
-    packet_params.flrc.payload_length = SX1280_FLRC_PAYLOAD_LENGTH_MAX;
     break;
   case SX1280_MODE_GFSK:
+    priv->cfg.gfsk.packet.payload_length = SX1280_GFSK_PAYLOAD_LENGTH_MAX;
     packet_params.gfsk = priv->cfg.gfsk.packet;
-    packet_params.gfsk.payload_length = SX1280_GFSK_PAYLOAD_LENGTH_MAX;
     break;
   case SX1280_MODE_LORA:
+    priv->cfg.lora.packet.payload_length = SX1280_LORA_PAYLOAD_LENGTH_MAX;
     packet_params.lora = priv->cfg.lora.packet;
-    packet_params.lora.payload_length = SX1280_LORA_PAYLOAD_LENGTH_MAX;
     break;
   case SX1280_MODE_RANGING:
     /* TODO */
@@ -1719,78 +1733,61 @@ static int sx1280_listen(struct sx1280_priv *priv) {
 
   if (
     (err = sx1280_set_packet_params(priv, packet_params))
-    || (err = sx1280_set_rx(priv, SX1280_PERIOD_BASE_15_625_US, 0xFFFF))
+    || (err = sx1280_set_rx(priv, priv->cfg.period_base, 0x0000))
   ) {
     dev_err(&priv->spi->dev, "failed to transition to listen\n");
   }
+
+  /* Wake up all waiters that are waiting for idle (anything but Tx). */
+  priv->state = SX1280_STATE_RX;
+  wake_up_all(&priv->idle_wait);
 
   return err;
 }
 
 /**
- * Threaded interrupt handler for DIO interrupt requests.
- * @context process
+ * @context process & locked
  */
-static irqreturn_t sx1280_irq(int irq, void *dev_id) {
-  int err;
-
-  struct sx1280_priv *priv = (struct sx1280_priv *) dev_id;
+static void sx1280_irq_tx(struct sx1280_priv *priv, u16 mask) {
   struct net_device *netdev = priv->netdev;
-  struct spi_device *spi = priv->spi;
-
-  mutex_lock(&priv->lock);
-
-  /*
-   * The SX1280 can give spurious interrupts during reset, and these should be
-   * ignored.
-   */
-  u16 mask;
-  if (
-    !priv->initialized
-    || (err = sx1280_get_irq_status(priv, &mask))
-  ) {
-    goto unlock;
-  }
-
-  dev_dbg(&spi->dev, "interrupt: mask=0x%04x\n", mask);
-
-  /*
-   * Handle interrupts specified by the mask.
-   */
 
   if ((mask & SX1280_IRQ_TX_DONE) || (mask & SX1280_IRQ_RX_TX_TIMEOUT)) {
-    /* Update netdev stats. */
+    /* Free the previous Tx packet in preparation for the next. */
+    spin_lock(&priv->tx_lock);
+    unsigned int skb_len = priv->tx_skb->len;
+    dev_kfree_skb(priv->tx_skb);
+    priv->tx_skb = NULL;
+    spin_unlock(&priv->tx_lock);
+
     if (mask & SX1280_IRQ_TX_DONE) {
       netdev->stats.tx_packets++;
-      netdev->stats.tx_bytes += priv->tx_skb->len;
+      netdev->stats.tx_bytes += skb_len;
     } else {
-      /*
-       * Rx cannot timeout because it's constantly listening.
-       * Any timeouts must be Tx, so the packet should be dropped in this case.
-       */
+      /* A timeout results in the packet being dropped. */
       netdev->stats.tx_dropped++;
       netdev_warn(netdev, "tx timeout (packet dropped)\n");
     }
 
-    /* Free the previous Tx packet in preparation for the next. */
-    dev_kfree_skb(priv->tx_skb);
-    priv->tx_skb = NULL;
-
-    /* Allow for changing of packet parameters if queued from userspace. */
-    priv->idle = true;
-    wake_up_all(&priv->idle_wait);
-
-    /* Switch back into listening. */
-    err = sx1280_listen(priv);
-
-    /* Restart the Tx packet queue. */
+    /* Put the chip back into Rx mode and wake the packet queue. */
+    /* 
+     * TODO: If there are packets queued, send them immediately instead of
+     * switching back into Rx.
+     */
+    sx1280_listen(priv);
     netif_wake_queue(netdev);
+  } else {
+    netdev_warn(netdev, "  unhandled tx irq\n");
   }
+}
 
-  if ((mask & SX1280_IRQ_RX_DONE) || (mask & SX1280_IRQ_SYNC_WORD_VALID)) {
+static void sx1280_irq_rx(struct sx1280_priv *priv, u16 mask) {
+  int err;
+  struct net_device *netdev = priv->netdev;
+
+  if (mask & SX1280_IRQ_RX_DONE) {
     union sx1280_packet_status status;
     if ((err = sx1280_get_packet_status(priv, &status))) {
-      goto rx_error;
+      goto fail;
     }
 
     /* TODO: Set the RSSI to be publicly accessible. */
@@ -1817,24 +1814,23 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
 
       break;
     case SX1280_MODE_RANGING:
-      netdev_err(priv->netdev, "received packet in ranging mode\n");
+      netdev_err(netdev, "received packet in ranging mode\n");
       err = -EIO;
-      goto rx_error;
+      goto fail;
     }
 
     /* Check errors after checking packet status for accurate debugging. */
-    /* TODO: maybe change this for efficiency after debugging */
     if (
       (mask & SX1280_IRQ_SYNC_WORD_ERROR)
       || (mask & SX1280_IRQ_HEADER_ERROR)
       || (mask & SX1280_IRQ_CRC_ERROR)
     ) {
       netdev_dbg(netdev, "rx error: mask=0x%04x\n", mask);
-      netdev->stats.rx_errors += 1;
-      goto rx_error;
+      netdev->stats.rx_errors++;
+      goto fail;
     }
 
-    u8 payload_start, payload_len;
+    u8 start, len;
 
     /*
      * Get the start and length of the received packet.
@@ -1843,50 +1839,127 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
      * in setup, but length has to be fetched so it might as well use the
      * offset provided.
      */
-    err = sx1280_get_rx_buffer_status(priv, &payload_len, &payload_start);
-    if (err) {
-      goto rx_error;
+    if (
+      (err = sx1280_get_rx_buffer_status(priv, &len, &start))
+    ) {
+      goto fail;
     }
 
+    netdev_dbg(netdev, "  start=0x%02x, len=%u\n", start, len);
+
     /* Allocate an SKB to hold the packet data and pass it to userspace. */
-    struct sk_buff *skb = dev_alloc_skb((unsigned int) payload_len);
+    struct sk_buff *skb = dev_alloc_skb((unsigned int) len);
     if (!skb) {
       netdev_err(netdev, "failed to allocate SKB for RX packet\n");
-      goto rx_error;
+      err = -ENOMEM;
+      goto fail;
     }
 
     /* Read the RX packet data directly into the SKB. */
-    void *rx_data = skb_put(skb, (unsigned int) payload_len);
-    err = sx1280_read_buffer(
-      priv,
-      payload_start,
-      (u8 *) rx_data,
-      (size_t) payload_len
-    );
-
+    void *rx_data = skb_put(skb, (unsigned int) len);
+    err = sx1280_read_buffer(priv, start, (u8 *) rx_data, (size_t) len);
     if (err) {
-      goto rx_error;
+      goto fail;
     }
 
-    netdev_dbg(netdev, "rx: %*ph\n", payload_len, rx_data);
+    /* Inspect the IP header to determine the version. */
+    u8 version = (((u8 *) rx_data)[0] >> 4) & 0x0F;
 
+    netdev_dbg(netdev, "rx: %*ph\n", len, rx_data);
     skb->dev = netdev;
-    skb->protocol = eth_type_trans(skb, netdev);
+    skb->protocol = version == 6 ? htons(ETH_P_IPV6) : htons(ETH_P_IP);
     skb->ip_summed = CHECKSUM_NONE;
 
     /* Update netdev stats. */
     netdev->stats.rx_packets++;
-    netdev->stats.rx_bytes += payload_len;
+    netdev->stats.rx_bytes += len;
 
     netif_rx(skb);
+
+    /*
+     * Put the chip back into Rx to listen for more packets.
+     * This is not done automatically because the chip is in single-Rx mode.
+     */
+    sx1280_listen(priv);
+  } else {
+    netdev_warn(netdev, "  unhandled rx irq\n");
   }
 
-rx_error:
+  return;
 
-  /* Acknowledge all interrupts. */
+fail:
+  sx1280_listen(priv);
+}
+
+/**
+ * Threaded interrupt handler for DIO interrupt requests.
+ * @context process
+ */
+static irqreturn_t sx1280_irq(int irq, void *dev_id) {
+  int err;
+  struct sx1280_priv *priv = (struct sx1280_priv *) dev_id;
+  struct spi_device *spi = priv->spi;
+
+  mutex_lock(&priv->lock);
+
+  /*
+   * The SX1280 can give spurious interrupts during reset, and these should be
+   * ignored.
+   */
+  u16 mask;
+  if (
+    !priv->initialized
+    || (err = sx1280_get_irq_status(priv, &mask))
+  ) {
+    goto fail;
+  }
+
+  dev_dbg(&spi->dev, "interrupt: mask=0x%04x\n", mask);
+
+  /* Acknowledge all interrupts immediately. */
   sx1280_clear_irq_status(priv, 0xFFFF);
 
-unlock:
+  switch (priv->state) {
+  case SX1280_STATE_RX: sx1280_irq_rx(priv, mask); break;
+  case SX1280_STATE_TX: sx1280_irq_tx(priv, mask); break;
+  default:
+    dev_warn(&spi->dev, "  (unhandled)\n");
+  }
+
+  /*
+   * Handle interrupts specified by the mask.
+   */
+
+  // if ((mask & SX1280_IRQ_TX_DONE) || (mask & SX1280_IRQ_RX_TX_TIMEOUT)) {
+  //  /* Free the previous Tx packet in preparation for the next. */
+  //   spin_lock(&priv->tx_lock);
+  //   unsigned int skb_len = priv->tx_skb->len;
+  //   dev_kfree_skb(priv->tx_skb);
+  //   priv->tx_skb = NULL;
+  //   spin_unlock(&priv->tx_lock);
+  //
+  //   /* Update netdev stats. */
+  //   if (mask & SX1280_IRQ_TX_DONE) {
+  //     netdev->stats.tx_packets++;
+  //     netdev->stats.tx_bytes += skb_len;
+  //   } else {
+  //     /*
+  //      * Rx cannot timeout because it's constantly listening.
+  //      * Any timeouts must be Tx, so the packet should be dropped in this case.
+  //      */
+  //     netdev->stats.tx_dropped++;
+  //     netdev_warn(netdev, "tx timeout (packet dropped)\n");
+  //   }
+  //
+  //   /* Allow for changing of packet parameters if queued from userspace. */
+  //   sx1280_listen(priv);
+  //   wake_up_all(&priv->idle_wait);
+  //
+  //   /* Restart the Tx packet queue. */
+  //   netif_wake_queue(netdev);
+  // }
+
+fail:
   mutex_unlock(&priv->lock);
   return IRQ_HANDLED;
 }
@@ -2074,6 +2147,7 @@ static int sx1280_setup(struct sx1280_priv *priv) {
   }
 
   dev_dbg(&spi->dev, "status: 0x%02x\n", status);
+  priv->state = SX1280_STATE_STANDBY;
 
   /* Extract circuit mode and command status and check for valid values. */
   u8 circuit_mode = FIELD_GET(SX1280_STATUS_CIRCUIT_MODE_MASK, status);
@@ -2101,7 +2175,8 @@ static int sx1280_setup(struct sx1280_priv *priv) {
   };
 
   if (
-    (err = sx1280_set_rf_frequency(priv, cfg->freq))
+    (err = sx1280_set_packet_type(priv, SX1280_MODE_GFSK))
+    || (err = sx1280_set_rf_frequency(priv, cfg->freq))
 
     /*
      * Set the Tx and Rx buffer base addresses to 0x0.
@@ -2135,12 +2210,11 @@ static int sx1280_setup(struct sx1280_priv *priv) {
         2
       )
     ) || (err = sx1280_set_tx_params(priv, cfg->power, cfg->ramp_time))
-    // || (err = sx1280_set_auto_fs(priv, true)) TODO
+    || (err = sx1280_set_auto_fs(priv, true))
   ) {
     return err;
   }
 
-  priv->idle = true;
   return 0;
 }
 
@@ -2151,8 +2225,8 @@ static const struct net_device_ops sx1280_netdev_ops = {
 };
 
 /**
- * Acquires the shared lock by waiting until idle, so that the chip
- * configuration can be changed. The wait times out after 1 second.
+ * Acquires the shared lock by waiting until idle, which is when the chip is not
+ * actively transmitting, so that configuration can be changed.
  *
  * NOTE: This function acquires the lock but does not release it unless it fails
  * and returns an error code. The shared lock must be released by the caller.
@@ -2168,10 +2242,15 @@ static int sx1280_acquire_idle(struct sx1280_priv *priv, bool locked) {
     return -ERESTARTSYS;
   }
 
-  while (!priv->idle) {
+  while (priv->state == SX1280_STATE_TX) {
     mutex_unlock(&priv->lock);
 
-    if ((err = wait_event_interruptible(priv->idle_wait, priv->idle))) {
+    if (
+      (err = wait_event_interruptible(
+        priv->idle_wait,
+        priv->state != SX1280_STATE_TX
+      ))
+    ) {
       return err;
     }
 
@@ -4215,7 +4294,7 @@ static ssize_t lora_preamble_bits_store(
     return err;
   }
 
-  /* 
+  /*
    * The LoRa preamble length format is different from the others:
    * Bits [3:0] - mantissa
    * Bits [7:4] - exponent
@@ -4398,6 +4477,33 @@ static const struct attribute_group *sx1280_groups[] = {
 };
 
 /**
+ * Net device allocation callback which configures the device.
+ */
+static void sx1280_configure(struct net_device *dev) {
+  /* TODO: Consider switching back to ARPHRD_ETHER for upstream. */
+  dev->type = ARPHRD_NONE;
+  
+  /* No link-layer (Ethernet) header */
+  dev->hard_header_len = 0;
+
+  /* No MAC addresses */
+  dev->addr_len = 0;
+
+  /* MTU defaults and bounds */
+  dev->mtu = SX1280_GFSK_PAYLOAD_LENGTH_MAX;
+  dev->min_mtu = 1;
+  dev->max_mtu = SX1280_GFSK_PAYLOAD_LENGTH_MAX;
+
+  /* Point-to-point interface, no broadcasting */
+  dev->flags = IFF_POINTOPOINT | IFF_NOARP;
+  dev->features = 0;
+  dev->hw_features = 0;
+  dev->header_ops = NULL;
+
+  dev->netdev_ops = &sx1280_netdev_ops;
+}
+
+/**
  * The core probe function for the SX1280.
  * @param spi - The SPI device wired to the SX1280.
  * @returns 0 on success, error code otherwise.
@@ -4405,19 +4511,16 @@ static const struct attribute_group *sx1280_groups[] = {
 static int sx1280_probe(struct spi_device *spi) {
   int err;
 
-  /* Allocate a new net device (without registering, yet). */
-  struct net_device *netdev = alloc_etherdev(sizeof(struct sx1280_priv));
-  if (!netdev) {
-    dev_err(&spi->dev, "failed to alloc etherdev\n");
-    return -ENOMEM;
-  }
+  /* Allocate and configure the net device. */
+  struct net_device *netdev = alloc_netdev(
+    sizeof(struct sx1280_priv),
+    "radio%d",
+    NET_NAME_ENUM,
+    sx1280_configure
+  );
 
-  /* Set properties of the net device. */
-  netdev->netdev_ops = &sx1280_netdev_ops;
-  netdev->mtu = SX1280_GFSK_PAYLOAD_LENGTH_MAX;
-  strcpy(netdev->name, "radio%d");
+  /* Associate the net device and spi device. */
   SET_NETDEV_DEV(netdev, &spi->dev);
-  eth_hw_addr_random(netdev);
 
   /* Create and register the priv structure. */
   struct sx1280_priv *priv = netdev_priv(netdev);
@@ -4426,6 +4529,7 @@ static int sx1280_probe(struct spi_device *spi) {
   priv->netdev = netdev;
   priv->spi = spi;
   mutex_init(&priv->lock);
+  spin_lock_init(&priv->tx_lock);
   init_waitqueue_head(&priv->idle_wait);
 
   /*
@@ -4490,7 +4594,7 @@ static int sx1280_probe(struct spi_device *spi) {
 
   if ((err = sysfs_create_groups(&netdev->dev.kobj, sx1280_groups))) {
     netdev_err(netdev, "failed to create sysfs entries\n");
-    goto error_wq;
+    goto error_free;
   }
 
   /*
@@ -4498,7 +4602,7 @@ static int sx1280_probe(struct spi_device *spi) {
    * TX when a packet is queued by userspace.
    */
   if ((err = sx1280_listen(priv))) {
-    goto error_wq;
+    goto error_groups;
   }
 
   /*
@@ -4516,11 +4620,15 @@ static int sx1280_probe(struct spi_device *spi) {
   dev_dbg(&spi->dev, "%s is listening for packets\n", netdev->name);
   return 0;
 
-error_wq:
-  mutex_unlock(&priv->lock);
-  destroy_workqueue(priv->xmit_queue);
+  /* TODO: fix ordering */
+error_groups:
+  sysfs_remove_groups(&netdev->dev.kobj, sx1280_groups);
 error_free:
+  unregister_netdev(netdev);
   free_netdev(netdev);
+error_wq:
+  destroy_workqueue(priv->xmit_queue);
+  mutex_unlock(&priv->lock);
   return err;
 }
 
@@ -4535,6 +4643,7 @@ static void sx1280_remove(struct spi_device *spi) {
   cancel_delayed_work_sync(&priv->status_check);
 #endif
 
+  sysfs_remove_groups(&priv->netdev->dev.kobj, sx1280_groups);
   cancel_work_sync(&priv->tx_work);
   destroy_workqueue(priv->xmit_queue);
   unregister_netdev(priv->netdev);
