@@ -1733,7 +1733,7 @@ static int sx1280_listen(struct sx1280_priv *priv) {
 
   if (
     (err = sx1280_set_packet_params(priv, packet_params))
-    || (err = sx1280_set_rx(priv, priv->cfg.period_base, 0x0000))
+    || (err = sx1280_set_rx(priv, priv->cfg.period_base, 0xFFFF))
   ) {
     dev_err(&priv->spi->dev, "failed to transition to listen\n");
   }
@@ -1769,7 +1769,7 @@ static void sx1280_irq_tx(struct sx1280_priv *priv, u16 mask) {
     }
 
     /* Put the chip back into Rx mode and wake the packet queue. */
-    /* 
+    /*
      * TODO: If there are packets queued, send them immediately instead of
      * switching back into Rx.
      */
@@ -1839,9 +1839,7 @@ static void sx1280_irq_rx(struct sx1280_priv *priv, u16 mask) {
      * in setup, but length has to be fetched so it might as well use the
      * offset provided.
      */
-    if (
-      (err = sx1280_get_rx_buffer_status(priv, &len, &start))
-    ) {
+    if ((err = sx1280_get_rx_buffer_status(priv, &len, &start))) {
       goto fail;
     }
 
@@ -1875,12 +1873,6 @@ static void sx1280_irq_rx(struct sx1280_priv *priv, u16 mask) {
     netdev->stats.rx_bytes += len;
 
     netif_rx(skb);
-
-    /*
-     * Put the chip back into Rx to listen for more packets.
-     * This is not done automatically because the chip is in single-Rx mode.
-     */
-    sx1280_listen(priv);
   } else {
     netdev_warn(netdev, "  unhandled rx irq\n");
   }
@@ -2102,7 +2094,7 @@ static int sx1280_reset(struct sx1280_priv *priv) {
 
   /* Toggle NRESET. */
   gpiod_set_value_cansleep(priv->reset, 1);
-  usleep_range(100, 150);
+  usleep_range(500, 1000);
   gpiod_set_value_cansleep(priv->reset, 0);
 
 #ifdef DEBUG
@@ -2140,6 +2132,7 @@ static int sx1280_setup(struct sx1280_priv *priv) {
   u8 status;
   if (
     (err = sx1280_reset(priv))
+    || (err = sx1280_set_standby(priv, SX1280_STDBY_RC))
     || (err = sx1280_get_status(priv, &status))
   ) {
     return err;
@@ -2550,7 +2543,7 @@ static ssize_t ramp_time_show(
     WARN(1, "invalid internal ramp_time: %d\n", ramp_time);
     return -EINVAL;
   }
-  
+
   return sprintf(buf, "%d\n", ramp_time_us);
 }
 
@@ -3473,7 +3466,7 @@ static ssize_t gfsk_crc_polynomial_store(
   }
 
   memcpy(priv->cfg.gfsk.crc_polynomial, crc_polynomial, 2);
-  
+
 fail:
   mutex_unlock(&priv->lock);
   return err ? err : count;
