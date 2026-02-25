@@ -1529,16 +1529,6 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *netdev) {
     break;
   }
 
-  /*
-   * Stop the packet queue, applying backpressure to the kernel networking stack
-   * that allows the driver to send one packet at a time. Packets that arrive in
-   * the intervening time will be queued by the networking stack.
-   *
-   * Once the corresponding packet has been sent and the chip is ready for a new
-   * one, `netif_wake_queue` is called to tell the kernel that it is permitted
-   * to call `sx1280_xmit` once again.
-   */
-  netif_stop_queue(netdev);
   spin_lock(&priv->tx_lock);
 
   /*
@@ -1549,10 +1539,21 @@ static netdev_tx_t sx1280_xmit(struct sk_buff *skb, struct net_device *netdev) {
    * stopped, they will still arrive here. In that case, apply backpressure to
    * the networking stack.
    */
-  if (priv->tx_skb) {
-    netdev_err(netdev, "packet transmission requested after queue frozen\n");
+  if (WARN_ON(priv->tx_skb)) {
+    spin_unlock(&priv->tx_lock);
     return NETDEV_TX_BUSY;
   }
+
+  /*
+   * Stop the packet queue, applying backpressure to the kernel networking stack
+   * that allows the driver to send one packet at a time. Packets that arrive in
+   * the intervening time will be queued by the networking stack.
+   *
+   * Once the corresponding packet has been sent and the chip is ready for a new
+   * one, `netif_wake_queue` is called to tell the kernel that it is permitted
+   * to call `sx1280_xmit` once again.
+   */
+  netif_stop_queue(netdev);
 
   /* Queue the work so that it can be performed in a non-atomic context. */
   priv->tx_skb = skb;
@@ -4473,10 +4474,8 @@ static const struct attribute_group *sx1280_groups[] = {
  * Net device allocation callback which configures the device.
  */
 static void sx1280_configure(struct net_device *dev) {
-  /* TODO: Consider switching back to ARPHRD_ETHER for upstream. */
-  dev->type = ARPHRD_NONE;
-  
-  /* No link-layer (Ethernet) header */
+  /* No link-layer header */
+  dev->type = ARPHRD_RAWIP;
   dev->hard_header_len = 0;
 
   /* No MAC addresses */
@@ -4486,6 +4485,9 @@ static void sx1280_configure(struct net_device *dev) {
   dev->mtu = SX1280_GFSK_PAYLOAD_LENGTH_MAX;
   dev->min_mtu = 1;
   dev->max_mtu = SX1280_GFSK_PAYLOAD_LENGTH_MAX;
+
+  /* Transmit queue defaults */
+  dev->tx_queue_len = 50;
 
   /* Point-to-point interface, no broadcasting */
   dev->flags = IFF_POINTOPOINT | IFF_NOARP;
