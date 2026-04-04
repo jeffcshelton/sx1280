@@ -2423,9 +2423,17 @@ static ssize_t tx_power_store(
     return err;
   }
 
-  priv->cfg.power = (u32) (power_dbm + 18);
+  u32 power = power_dbm + 18;
+
+  if ((err = sx1280_set_tx_params(priv, power, priv->cfg.ramp_time))) {
+    goto fail;
+  }
+
+  priv->cfg.power = power;
+
+fail:
   mutex_unlock(&priv->lock);
-  return count;
+  return err ? err : count;
 }
 
 /**
@@ -2581,9 +2589,15 @@ static ssize_t ramp_time_store(
     return err;
   }
 
+  if ((err = sx1280_set_tx_params(priv, priv->cfg.power, ramp_time))) {
+    goto fail;
+  }
+
   priv->cfg.ramp_time = ramp_time;
+
+fail:
   mutex_unlock(&priv->lock);
-  return count;
+  return err ? err : count;
 }
 
 static ssize_t frequency_show(
