@@ -629,6 +629,12 @@ enum sx1280_state {
   SX1280_STATE_RX,
 };
 
+struct sx1280_last_rx {
+  enum sx1280_mode mode;
+  union sx1280_packet_status status;
+  bool valid;
+};
+
 /* The private, internal structure for the SX1280 driver. */
 struct sx1280_priv {
   /* Devices */
@@ -686,6 +692,8 @@ struct sx1280_priv {
    * during setup, causing the device / driver to enter an invalid state.
    */
   bool initialized;
+
+  struct sx1280_last_rx last_rx;
 
 #ifdef DEBUG
   struct delayed_work status_check;
@@ -1791,6 +1799,13 @@ static void sx1280_irq_rx(struct sx1280_priv *priv, u16 mask) {
       goto fail;
     }
 
+    /* Update last-received packet stats. */
+    priv->last_rx = (struct sx1280_last_rx) {
+      .status = status,
+      .mode = priv->cfg.mode,
+      .valid = true,
+    };
+
     /* TODO: Set the RSSI to be publicly accessible. */
     switch (priv->cfg.mode) {
     case SX1280_MODE_FLRC:
@@ -1918,39 +1933,6 @@ static irqreturn_t sx1280_irq(int irq, void *dev_id) {
   default:
     dev_warn(&spi->dev, "  (unhandled)\n");
   }
-
-  /*
-   * Handle interrupts specified by the mask.
-   */
-
-  // if ((mask & SX1280_IRQ_TX_DONE) || (mask & SX1280_IRQ_RX_TX_TIMEOUT)) {
-  //  /* Free the previous Tx packet in preparation for the next. */
-  //   spin_lock(&priv->tx_lock);
-  //   unsigned int skb_len = priv->tx_skb->len;
-  //   dev_kfree_skb(priv->tx_skb);
-  //   priv->tx_skb = NULL;
-  //   spin_unlock(&priv->tx_lock);
-  //
-  //   /* Update netdev stats. */
-  //   if (mask & SX1280_IRQ_TX_DONE) {
-  //     netdev->stats.tx_packets++;
-  //     netdev->stats.tx_bytes += skb_len;
-  //   } else {
-  //     /*
-  //      * Rx cannot timeout because it's constantly listening.
-  //      * Any timeouts must be Tx, so the packet should be dropped in this case.
-  //      */
-  //     netdev->stats.tx_dropped++;
-  //     netdev_warn(netdev, "tx timeout (packet dropped)\n");
-  //   }
-  //
-  //   /* Allow for changing of packet parameters if queued from userspace. */
-  //   sx1280_listen(priv);
-  //   wake_up_all(&priv->idle_wait);
-  //
-  //   /* Restart the Tx packet queue. */
-  //   netif_wake_queue(netdev);
-  // }
 
 fail:
   mutex_unlock(&priv->lock);
@@ -2364,10 +2346,9 @@ static ssize_t mode_store(
     return -EINVAL;
   }
 
-  if (
-    (err = sx1280_acquire_stdby(priv, false))
-    || (err = sx1280_set_packet_type(priv, new_mode))
-  ) {
+  if ((err = sx1280_acquire_stdby(priv, false))) {
+    return err;
+  } else if ((err = sx1280_set_packet_type(priv, new_mode))) {
     goto fail;
   }
 
@@ -2376,6 +2357,74 @@ static ssize_t mode_store(
 fail:
   mutex_unlock(&priv->lock);
   return err ? err : count;
+}
+
+static ssize_t rssi_inst_show(
+  struct device *dev,
+  struct device_attribute *attr,
+  char *buf
+) {
+  int err;
+  struct net_device *netdev = to_net_dev(dev);
+  struct sx1280_priv *priv = netdev_priv(netdev);
+
+  if ((err = sx1280_acquire_idle(priv, false))) {
+    return err;
+  }
+
+  u8 rssi;
+  err = sx1280_get_rssi_inst(priv, &rssi);
+  mutex_unlock(&priv->lock);
+
+  if (err) {
+    return err;
+  }
+
+  int power = (int) rssi * -500;
+  return sprintf(buf, "%d\n", power);
+}
+
+static ssize_t rssi_last_packet_show(
+  struct device *dev,
+  struct device_attribute *attr,
+  char *buf
+) {
+  struct net_device *netdev = to_net_dev(dev);
+  struct sx1280_priv *priv = netdev_priv(netdev);
+
+  if (mutex_lock_interruptible(&priv->lock)) {
+    return -ERESTARTSYS;
+  }
+
+  if (!priv->last_rx.valid) {
+    mutex_unlock(&priv->lock);
+    return -ENODATA;
+  }
+
+  union sx1280_packet_status last_rx_status = priv->last_rx.status;
+  enum sx1280_mode last_rx_mode = priv->last_rx.mode;
+  mutex_unlock(&priv->lock);
+
+  int power;
+
+  switch (last_rx_mode) {
+  case SX1280_MODE_LORA:
+  case SX1280_MODE_RANGING:
+    power = (int) last_rx_status.lora.rssi_sync * -500;
+    int snr = (int) (s8) last_rx_status.lora.snr * 250;
+
+    if (snr < 0) {
+      power -= snr;
+    }
+
+    break;
+  case SX1280_MODE_FLRC:
+  case SX1280_MODE_GFSK:
+    power = (int) last_rx_status.gfsk_flrc.rssi_sync * -500;
+    break;
+  }
+
+  return sprintf(buf, "%d\n", power);
 }
 
 static ssize_t tx_power_show(
@@ -4461,6 +4510,9 @@ static DEVICE_ATTR_RO(busy);
 static DEVICE_ATTR_RW(crc_seed);
 static DEVICE_ATTR_RW(frequency);
 static DEVICE_ATTR_RW(mode);
+static DEVICE_ATTR_RW(ramp_time);
+static DEVICE_ATTR_RO(rssi_inst);
+static DEVICE_ATTR_RO(rssi_last_packet);
 static DEVICE_ATTR_RW(tx_power);
 
 static struct attribute *sx1280_attrs[] = {
@@ -4468,6 +4520,9 @@ static struct attribute *sx1280_attrs[] = {
   &dev_attr_crc_seed.attr,
   &dev_attr_frequency.attr,
   &dev_attr_mode.attr,
+  &dev_attr_ramp_time.attr,
+  &dev_attr_rssi_inst.attr,
+  &dev_attr_rssi_last_packet.attr,
   &dev_attr_tx_power.attr,
   NULL,
 };
@@ -4613,6 +4668,9 @@ static int sx1280_probe(struct spi_device *spi) {
    */
   priv->initialized = true;
   mutex_unlock(&priv->lock);
+
+  /* Emit a CHANGE event for sysfs writers. */
+  kobject_uevent(&netdev->dev.kobj, KOBJ_CHANGE);
 
 #ifdef DEBUG
   INIT_DELAYED_WORK(&priv->status_check, sx1280_check_status);

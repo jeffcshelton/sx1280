@@ -64,14 +64,14 @@
           };
 
           mode = mkOption {
-            type = types.enum [ "ble" "flrc" "gfsk" "lora" ];
+            type = types.enum [ "flrc" "gfsk" "lora" "ranging" ];
             default = "gfsk";
             description = ''
               Operating mode of the transceiver.
-              - ble: Bluetooth Low Energy
               - gfsk: Gaussian Frequency Shift Keying
               - flrc: Fast Long Range Communication
               - lora: LoRa modulation
+              - ranging: Distance ranging
             '';
           };
 
@@ -350,11 +350,11 @@
 
           services.udev.extraRules = ''
             # Configure the SX1280 via sysfs when it appears.
-            SUBSYSTEM=="net", DRIVER=="sx1280", ACTION=="add", \
+            SUBSYSTEM=="net", DRIVERS=="sx1280", ACTION=="change", \
               ATTR{frequency}="${toString (cfg.frequencyMHz * 1000000)}", \
               ATTR{mode}="${cfg.mode}", \
-              ATTR{tx_power}="${toString (cfg.txPower)}", \
               ATTR{ramp_time}="${toString (cfg.rampTimeUs)}", \
+              ATTR{tx_power}="${toString (cfg.txPower)}", \
               ATTR{crc_seed}="${cfg.crcSeed}", \
               ATTR{flrc/bandwidth_time}="${cfg.flrc.bandwidthTime}", \
               ATTR{flrc/bitrate_bandwidth}="${
@@ -374,7 +374,7 @@
               },${
                 toString (cfg.gfsk.bandwidthKHz * 1000)
               }", \
-              ATTR{gfsk/crc_length}="${toString (cfg.gfsk.crcBytes)}", \
+              ATTR{gfsk/crc_bytes}="${toString (cfg.gfsk.crcBytes)}", \
               ATTR{gfsk/crc_polynomial}="${cfg.gfsk.crcPolynomial}", \
               ATTR{gfsk/modulation_index}="${cfg.gfsk.modulationIndex}", \
               ATTR{gfsk/preamble_bits}="${toString (cfg.gfsk.preambleBits)}", \
