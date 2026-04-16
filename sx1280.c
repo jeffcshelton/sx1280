@@ -2287,6 +2287,7 @@ static int sx1280_acquire_stdby(struct sx1280_priv *priv, bool locked) {
     return err;
   }
 
+  priv->state = SX1280_STATE_STANDBY;
   return 0;
 }
 
@@ -2348,13 +2349,18 @@ static ssize_t mode_store(
 
   if ((err = sx1280_acquire_stdby(priv, false))) {
     return err;
-  } else if ((err = sx1280_set_packet_type(priv, new_mode))) {
-    goto fail;
+  }
+
+  if ((err = sx1280_set_packet_type(priv, new_mode))) {
+    mutex_unlock(&priv->lock);
+    return err;
   }
 
   priv->cfg.mode = new_mode;
 
-fail:
+  /* Put chip back into RX from STDBY. */
+  err = sx1280_listen(priv);
+
   mutex_unlock(&priv->lock);
   return err ? err : count;
 }
